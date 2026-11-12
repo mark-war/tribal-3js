@@ -10,7 +10,26 @@ export const WALL_FLAT = 50; // flat defense per wall level (on top of the free 
 export const BASE_DEFENSE = 20; // every village has a little free defense
 export const RAM_DECAY = 1.09; // rams get less effective against higher walls
 export const CATS_PER_LEVEL = 3; // surviving catapults needed per building level destroyed
-export const NOBLE_LOYALTY_HIT = 25; // loyalty removed by each surviving noble on a won attack
+export const NOBLE_LOYALTY_MIN = 20; // ONE noble works per attack and cuts the loyalty by 20..35 (the others in the same attack come home alive)
+export const NOBLE_LOYALTY_MAX = 35;
+export const NOBLE_LOYALTY_HIT = (NOBLE_LOYALTY_MIN + NOBLE_LOYALTY_MAX) / 2; // the average, for estimates
+export const LUCK_RANGE = 0.25; // luck: an attack counts for 75%..125% of its strength
+
+/** A fixed pseudo-random number in [0,1) for a text: the same attack always gets the same luck, reloading changes nothing. */
+export const hash01 = (s: string) => {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++)
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  h = Math.imul(h ^ (h >>> 15), 2246822507);
+  return ((h ^ (h >>> 13)) >>> 0) / 4294967296;
+};
+export const loyaltyHit = (seed: string) =>
+  NOBLE_LOYALTY_MIN +
+  Math.floor(
+    (NOBLE_LOYALTY_MAX - NOBLE_LOYALTY_MIN + 1) * hash01("loyalty:" + seed),
+  );
+export const luckFor = (seed: string) =>
+  1 - LUCK_RANGE + 2 * LUCK_RANGE * hash01("luck:" + seed);
 
 export const ATTACK_CLASSES: AttackClass[] = ["infantry", "cavalry", "ranged"];
 export const CLASS_ICON: Record<AttackClass, string> = {
@@ -236,7 +255,7 @@ export function simulateWaves(
     def = r.defenderLeft;
     wall = r.wallAfter;
     if (r.attackerWins && r.attackerLeft.noble > 0) {
-      loyalty -= NOBLE_LOYALTY_HIT * r.attackerLeft.noble;
+      loyalty -= NOBLE_LOYALTY_HIT; // one noble works per attack (an estimate: the real hit is 20..35)
       if (loyalty < 1) conquered = true;
     }
     return {
@@ -248,9 +267,11 @@ export function simulateWaves(
   });
 }
 
-/** Surviving nobles needed to take a village at this loyalty (it counts as taken below 1). */
-export const noblesNeeded = (loyalty: number) =>
-  Math.max(1, Math.ceil((loyalty - 1) / NOBLE_LOYALTY_HIT));
+/** Nobles needed to take a village at this loyalty (one noble per attack, each cutting 20..35): the lucky minimum and the unlucky maximum. */
+export const noblesNeeded = (loyalty: number) => ({
+  min: Math.max(1, Math.ceil((loyalty - 1) / NOBLE_LOYALTY_MAX)),
+  max: Math.max(1, Math.ceil((loyalty - 1) / NOBLE_LOYALTY_MIN)),
+});
 
 /** After a battle, give every stack of a garrison (own troops, each support stack) the same per-unit survival rate. */
 export function survivorsOf(stack: Units, before: Units, after: Units): Units {

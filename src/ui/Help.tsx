@@ -473,14 +473,28 @@ function WorldTab() {
         arrive (you can see the lines on the map), fights with the very same
         battle rules you play by, and the survivors walk home with the loot.
         Troops die, walls fall, and a village is weaker while its army is out.
-        If the target changed hands on the way, the army turns back. Bots{" "}
-        <b>conquer villages from each other</b> (and from barbarians) when they
-        have earned nobles: an Academy, the buildings behind it, and the
-        resources of four nobles. The <b>📰 World news</b> tab in the ranking
-        tells the story, and <b>🏆 Ranking</b> shows who is leading: you and all{" "}
-        {BOTS.length} bots, by points, villages, kills, loot or resources sent.
-        Your numbers are exact; a bot's kills, looted and sent are an{" "}
-        <b>estimate</b> of its off-screen life <b>plus every real event</b>.
+        If the target changed hands on the way, the army turns back. Before a
+        bot attacks anything it <b>scouts it</b> (a real scouting mission,
+        scouts duel scouts just like yours) and sizes its army from that report,
+        which can be out of date: if you strengthen a village after they looked,
+        they can lose their army. A bot learns from its own battles too, and it
+        doubles its scouts after a failure. Bots{" "}
+        <b>conquer villages with a noble train</b> when they have earned nobles
+        (an Academy, the buildings behind it, resources for four nobles): a
+        clearing wave, then{" "}
+        <b>four waves landing right behind it, one noble in each</b> with a
+        small escort, because only one noble works per attack. Without rams a
+        bot can't take a walled village, so it only tries when its escort can
+        beat the wall on its own. A threatened bot village <b>calls for help</b>
+        : its other villages send up to half of their defenders as support, if
+        they can arrive before the attack lands (this includes attacks by you),
+        and bring them home when the danger has passed. A bot with several
+        villages also moves resources between them with real caravans. The{" "}
+        <b>📰 World news</b> tab in the ranking tells the story, and{" "}
+        <b>🏆 Ranking</b> shows who is leading: you and all {BOTS.length} bots,
+        by points, villages, kills, loot or resources sent. Your numbers are
+        exact; a bot's kills, looted and sent are an <b>estimate</b> of its
+        off-screen life <b>plus every real event</b>.
       </p>
       <h3>Eliminated bots start again</h3>
       <p>
@@ -558,10 +572,14 @@ function WorldTab() {
           reach.
         </li>
         <li>
-          <b>Noble runs:</b> four nobles under escort. Each noble that survives
-          cuts the village's loyalty by 25; at 0 the village is theirs,{" "}
-          <b>and troops you had away from it and marches it sent are lost</b>.
-          Beat the escort and the nobles die with it.
+          <b>Noble trains:</b> they scout you first (you see 🔍 SCOUTS on the
+          Incoming panel, and your own scouts at home fight them), then a
+          clearing wave comes, and four waves with <b>one noble each</b> land
+          right behind it. Each noble that gets through cuts the loyalty by
+          20–35; at 0 the village is theirs,{" "}
+          <b>and troops you had away from it and marches it sent are lost</b>.{" "}
+          <b>Kill the nobles</b> (keep troops home, send support, or snipe a
+          wave) and the train fails. Your last village can never be taken.
         </li>
         <li>
           Raiders' villages are <b>weaker while the army is out</b>, they{" "}
@@ -719,9 +737,9 @@ function WarTab() {
       </ol>
       <div className="ex">
         <b>Noble train:</b> the first wave kills the defenders and smashes the
-        wall; nobles land right behind it, one per wave, each cutting{" "}
-        {NOBLE_LOYALTY_HIT} loyalty. Landing them apart means the defenders are
-        already dead when they arrive.
+        wall; nobles land right behind it, one per wave, each cutting 20–35
+        loyalty. Landing them apart means the defenders are already dead when
+        they arrive.
       </div>
       <p>
         <b>Recall:</b> a march can be called back during the first 10
@@ -750,10 +768,13 @@ function LoyaltyTab() {
           die with it.
         </li>
         <li>
-          Each <b>surviving noble</b> lowers loyalty by{" "}
-          <b>{NOBLE_LOYALTY_HIT}</b>. Nobles are used up either way, so 4 nobles
-          are needed for a full-loyalty village (one attack), or fewer over
-          several attacks.
+          <b>One noble works per attack</b> and lowers loyalty by <b>20–35</b>{" "}
+          (average {NOBLE_LOYALTY_HIT}, fixed for that attack). The others in
+          the same attack are wasted effort: they come home alive. So a
+          full-loyalty village needs{" "}
+          <b>3 to 5 attacks, each with its own noble</b>: that is a{" "}
+          <b>noble train</b>, which the War Table builds for you. The noble is
+          used up either way.
         </li>
         <li>
           At <b>0 or below</b> the village becomes yours. Loyalty is set to 25,
@@ -895,6 +916,28 @@ function EcoTab() {
           ))}
         </tbody>
       </table>
+      <h3>Luck 🍀</h3>
+      <p>
+        With <b>luck on</b> (a New game option), every attack counts for{" "}
+        <b>75%–125%</b> of its strength. The luck is fixed for that attack
+        (reloading changes nothing) and shown in the report. The simulator has a
+        Luck box to try bad and good luck, and every report has a{" "}
+        <b>🧪 Open in the simulator</b> button that loads both armies, the wall,
+        the smithies and the luck of that fight. Bots' attacks get luck too, so
+        a bot sized exactly to your defense can still lose, or win more than it
+        should.
+      </p>
+      <h3>War Table presets</h3>
+      <p>
+        The presets (Strike, Raid, Scout, Garrison, Noble train) are ordinary
+        presets: click one to load it, then{" "}
+        <b>change the waves, rename it and 💾 Update</b>, delete it, or save the
+        waves as a new one. <b>∞</b> next to a unit means "all I have", so the
+        preset stays up to date as your army grows (a fixed number stays fixed).
+        Fixed numbers are given out first, so the noble train's escorts are
+        protected and the clearing wave takes what is left; if you have fewer
+        nobles than waves, the extra noble waves drop out.
+      </p>
       <h3>Cancelling</h3>
       <p>
         Every construction and training order has a <b>✕</b>: it gives back{" "}
@@ -927,37 +970,48 @@ function EcoTab() {
   );
 }
 
-function Sim({
-  initialAttacker,
-  initialDefender,
-  initialWall = 0,
-  initialDefSmithy = 0,
-}: {
-  initialAttacker?: Partial<Units>;
-  initialDefender?: Partial<Units>;
-  initialWall?: number;
-  initialDefSmithy?: number;
-} = {}) {
-  const [a, setA] = useState<Partial<Units>>(
-    initialAttacker || { axe: 20, ram: 4 },
-  );
+/** What a report hands to the simulator: both armies, the wall and the smithies. */
+export interface SimSeed {
+  a: Partial<Units>;
+  d: Partial<Units>;
+  wall: number;
+  smithy: number;
+  defSmithy: number;
+  heroLvl: number;
+  luck?: number;
+  note?: string;
+}
+
+function Sim({ seed }: { seed?: SimSeed | null }) {
+  const [a, setA] = useState<Partial<Units>>(seed?.a ?? { axe: 20, ram: 4 });
   const [d, setD] = useState<Partial<Units>>(
-    initialDefender || { spear: 10, sword: 5 },
+    seed?.d ?? { spear: 10, sword: 5 },
   );
-  const [wall, setWall] = useState(initialWall);
-  const [smithy, setSmithy] = useState(0);
-  const [heroLvl, setHeroLvl] = useState(1);
-  const [defSmithy, setDefSmithy] = useState(initialDefSmithy);
+  const [wall, setWall] = useState(seed?.wall ?? 5);
+  const [smithy, setSmithy] = useState(seed?.smithy ?? 0);
+  const [heroLvl, setHeroLvl] = useState(seed?.heroLvl || 1);
+  const [defSmithy, setDefSmithy] = useState(seed?.defSmithy ?? 0);
+  const [luckPct, setLuckPct] = useState(
+    Math.round(((seed?.luck ?? 1) - 1) * 100),
+  ); // luck: -25..+25 (% of the attack)
   const att = normalizeUnits(a);
   const def = normalizeUnits(d);
-  const bonus = attackBonusFor(smithy, att, heroLvl);
+  const bonus = attackBonusFor(smithy, att, heroLvl) * (1 + luckPct / 100);
   const p = battlePowers(att, def, wall, bonus, defenseBonusFor(defSmithy));
   const r = resolveBattle(att, def, wall, bonus, defenseBonusFor(defSmithy));
   const nobles = r.attackerWins ? r.attackerLeft.noble : 0;
   const cats = r.attackerWins ? catapultLevels(r.attackerLeft.catapult) : 0;
   return (
     <>
-      <p>Try any battle. Nothing here touches your game.</p>
+      <p>
+        Try any battle. Nothing here touches your game.
+        {seed?.note && (
+          <>
+            {" "}
+            <b>{seed.note}</b>
+          </>
+        )}
+      </p>
       <table>
         <thead>
           <tr>
@@ -1026,6 +1080,24 @@ function Sim({
             onChange={(e) => setDefSmithy(Math.min(20, int(e.target.value)))}
           />
         </label>
+        <label title="Luck changes how strong the attack counts: −25% to +25%. Every real attack gets a fixed random luck.">
+          🍀 Luck %{" "}
+          <input
+            type="number"
+            min={-25}
+            max={25}
+            style={{ width: 52 }}
+            value={luckPct}
+            onChange={(e) =>
+              setLuckPct(
+                Math.max(
+                  -25,
+                  Math.min(25, Math.round(Number(e.target.value) || 0)),
+                ),
+              )
+            }
+          />
+        </label>
         <label>
           Paladin level{" "}
           <input
@@ -1066,7 +1138,11 @@ function Sim({
         <div>Defenders left: {list(r.defenderLeft)}</div>
         <div>Wall afterwards: {r.wallAfter}</div>
         {r.attackerWins && nobles > 0 && (
-          <div>👑 Loyalty −{nobles * NOBLE_LOYALTY_HIT}</div>
+          <div>
+            👑 One noble works per attack: loyalty −20…35 (average{" "}
+            {NOBLE_LOYALTY_HIT})
+            {nobles > 1 && ` · the other ${nobles - 1} would come home`}
+          </div>
         )}
         {cats > 0 && <div>🏚 Chosen building −{cats} level(s)</div>}
       </div>
@@ -1079,12 +1155,7 @@ export default function Help({
   seed,
 }: {
   onClose: () => void;
-  seed?: {
-    attacker?: Partial<Units>;
-    defender?: Partial<Units>;
-    wall?: number;
-    defSmithy?: number;
-  };
+  seed?: SimSeed | null;
 }) {
   const [tab, setTab] = useState<Tab>(seed ? "sim" : "combat");
   return (
@@ -1117,14 +1188,7 @@ export default function Help({
         {tab === "reports" && <ReportsTab />}
         {tab === "scout" && <ScoutTab />}
         {tab === "eco" && <EcoTab />}
-        {tab === "sim" && (
-          <Sim
-            initialAttacker={seed?.attacker}
-            initialDefender={seed?.defender}
-            initialWall={seed?.wall}
-            initialDefSmithy={seed?.defSmithy}
-          />
-        )}
+        {tab === "sim" && <Sim seed={seed} />}
       </div>
     </div>
   );

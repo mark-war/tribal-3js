@@ -1,3 +1,4 @@
+import { resolveWaves } from "../game/presets";
 import { useState } from "react";
 import { BUILDINGS, BUILDING_IDS } from "../game/config/buildings";
 import { UNITS, UNIT_IDS } from "../game/config/units";
@@ -49,7 +50,7 @@ export default function QuickSend({
   t: Village;
   onWar: (seed: WaveDraft) => void;
 }) {
-  const { intel, hero, plan } = useGame();
+  const { intel, hero, plan, presets } = useGame();
   useGame((s) => s.now);
   const now = Date.now();
   const own = t.owner === PLAYER;
@@ -125,51 +126,24 @@ export default function QuickSend({
   return (
     <div style={{ marginTop: 6 }}>
       <div>
-        {own ? (
-          <>
+        {presets
+          .filter(
+            (p) =>
+              p.waves.length === 1 && (p.waves[0].kind === "support") === own,
+          )
+          .map((p) => (
             <span
+              key={p.id}
               className="chip"
-              onClick={() =>
-                setSel(
-                  Object.fromEntries(DEFENDERS.map((u) => [u, v.units[u]])),
-                )
-              }
+              title="From your War Table presets (edit them there)"
+              onClick={() => setSel(resolveWaves([p.waves[0]], v.units)[0])}
             >
-              🛡 Defenders
+              {p.name}
             </span>
-            <span className="chip" onClick={() => setSel({ ...v.units })}>
-              All
-            </span>
-          </>
-        ) : (
-          <>
-            <span
-              className="chip"
-              onClick={() =>
-                setSel(Object.fromEntries(OFFENSE.map((u) => [u, v.units[u]])))
-              }
-            >
-              ⚔ Strike
-            </span>
-            <span
-              className="chip"
-              onClick={() =>
-                setSel({ light: v.units.light, mounted: v.units.mounted })
-              }
-            >
-              🐎 Raid
-            </span>
-            <span
-              className="chip"
-              onClick={() => setSel({ scout: Math.min(3, v.units.scout) })}
-            >
-              🔍 Scout ×3
-            </span>
-            <span className="chip" onClick={() => setSel({ ...v.units })}>
-              All
-            </span>
-          </>
-        )}
+          ))}
+        <span className="chip" onClick={() => setSel({ ...v.units })}>
+          All
+        </span>
         <span className="chip" onClick={() => setSel({})}>
           Clear
         </span>
@@ -270,22 +244,28 @@ export default function QuickSend({
               </small>
             </div>
           )}
-          {strike.noble > 0 && (
-            <div
-              className={
-                strike.noble < noblesNeeded(intelT?.loyalty ?? 100)
-                  ? "warn"
-                  : "green"
-              }
-            >
-              <small>
-                👑 {noblesNeeded(intelT?.loyalty ?? 100)} nobles must survive to
-                take it at loyalty {Math.round(intelT?.loyalty ?? 100)}
-                {intelT ? "" : " (assumed)"}; you send {strike.noble}. For
-                several waves use the War Table.
-              </small>
-            </div>
-          )}
+          {strike.noble > 0 &&
+            (() => {
+              const need = noblesNeeded(intelT?.loyalty ?? 100);
+              return (
+                <div className={need.min <= 1 ? "green" : "warn"}>
+                  <small>
+                    👑 Only <b>one</b> noble works per attack and cuts loyalty
+                    by 20–35
+                    {strike.noble > 1
+                      ? ` (the other ${strike.noble - 1} just come home)`
+                      : ""}
+                    . At loyalty {Math.round(intelT?.loyalty ?? 100)}
+                    {intelT ? "" : " (assumed)"} you need{" "}
+                    {need.min === need.max
+                      ? need.min
+                      : `${need.min}–${need.max}`}{" "}
+                    such attacks, one noble each. For a noble train use the War
+                    Table.
+                  </small>
+                </div>
+              );
+            })()}
           {!intelFull && hasStrike && (
             <div className="warn">
               <small>

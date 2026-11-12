@@ -26,8 +26,11 @@ export default function Incoming({
   const raids = commands
     .filter(
       (c) =>
-        c.kind === "raid" ||
-        (c.kind === "expand" && villages[c.toId]?.owner === PLAYER),
+        (c.kind === "raid" ||
+          c.kind === "expand" ||
+          (c.kind === "scout" && !!c.clan)) &&
+        villages[c.toId]?.owner === PLAYER &&
+        c.arriveAt > now,
     )
     .sort((a, b) => a.arriveAt - b.arriveAt);
   if (!raids.length) return null;
@@ -64,7 +67,11 @@ export default function Incoming({
           <div key={c.id} className="wcard">
             <div className="row">
               <span>
-                {c.kind === "expand" ? "👑 NOBLE RUN" : "🚩"}{" "}
+                {c.kind === "expand"
+                  ? "👑 NOBLE"
+                  : c.kind === "scout"
+                    ? "🔍 SCOUTS"
+                    : "🚩"}{" "}
                 <b>{c.clan ?? "Raiders"}</b> → {target?.name ?? c.toId} · lands
                 in <b>{dur(c.arriveAt - now)}</b>
               </span>
@@ -77,9 +84,11 @@ export default function Incoming({
               </button>
             </div>
             <small>
-              {c.kind === "expand"
-                ? `Four nobles under escort: every noble that survives the fight cuts this village's loyalty by 25 (it is at ${Math.round(target?.loyalty ?? 100)}). Beat the escort and the nobles die with it. Your last village can never be taken.`
-                : "Their army is unknown until it arrives. Scout their villages to learn what they field."}
+              {c.kind === "scout"
+                ? `A scouting mission: they want to know what you have. Your own scouts at home fight them (about 0.6 of theirs die per scout of yours); the more scouts you keep home, the less they learn.`
+                : c.kind === "expand"
+                  ? `A noble with a small escort, part of a TRAIN: one noble works per attack and cuts loyalty by 20–35 (it is at ${Math.round(target?.loyalty ?? 100)}). Kill the nobles (defend, or send support) and the train fails. Your last village can never be taken.`
+                  : "Their army is unknown until it arrives. Scout their villages to learn what they field."}
             </small>
             {helpers.length === 0 && (
               <div>

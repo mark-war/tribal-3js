@@ -353,3 +353,10 @@ select {
 .side {
   max-height: calc(100% - 112px);
 }
+
+.chip.on {
+  outline: 2px solid #ffd54f;
+}
+button.on {
+  background: #5b6b2a;
+}

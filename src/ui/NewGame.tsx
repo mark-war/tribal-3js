@@ -12,8 +12,16 @@ const MODES: [RivalMode, string][] = [
 
 /** Erase the saved game and begin a new journey. (Later this is where a game mode, solo journey or multiplayer, gets picked.) */
 export default function NewGame({ onClose }: { onClose: () => void }) {
-  const { newGame, gameSpeed, rivalMode, villages, stats, worldClock } =
-    useGame();
+  const {
+    newGame,
+    gameSpeed,
+    rivalMode,
+    villages,
+    stats,
+    worldClock,
+    luck: luckNow,
+  } = useGame();
+  const [luck, setLuck] = useState(luckNow);
   const [speed, setSpeed] = useState(gameSpeed);
   const [mode, setMode] = useState<RivalMode>(rivalMode);
   const [name, setName] = useState("");
@@ -74,6 +82,16 @@ export default function NewGame({ onClose }: { onClose: () => void }) {
               ))}
             </select>
           </div>
+          <div className="row">
+            <label title="With luck, every attack counts for 75%–125% of its strength (fixed for that attack, shown in the report). Without it, battles are exactly what the numbers say.">
+              <input
+                type="checkbox"
+                checked={luck}
+                onChange={(e) => setLuck(e.target.checked)}
+              />{" "}
+              🍀 Luck in battles (±25% on each attack)
+            </label>
+          </div>
           <small>
             You can change speed and rivals later from the top bar. The world
             has been running for {Math.round(worldClock.age)} game hours.
@@ -90,7 +108,7 @@ export default function NewGame({ onClose }: { onClose: () => void }) {
           <button
             style={{ width: "100%", marginTop: 8, background: "#a33" }}
             onClick={() => {
-              newGame({ speed, mode, name });
+              newGame({ speed, mode, name, luck });
               onClose();
             }}
           >

@@ -18,20 +18,27 @@ export async function advisorStep(fetchImpl?: typeof fetch): Promise<string> {
   const points = owned.reduce((n, v) => n + v.points, 0);
   const protectedNow = protectionLeftHours(worldAgeHours(now), points) > 0;
   const nem = nemesisClan();
-  const ctx: TurnCtx = {
+  const held = Object.fromEntries(
+    Object.entries(s.rivals).map(([k, r]) => [k, r.held ?? 0]),
+  );
+  const stanceOf = (id: string): "no" | "raid" | "conquer" =>
+    protectedNow || s.rivalMode === "peace"
+      ? "no"
+      : s.rivalMode === "war"
+        ? "conquer"
+        : (s.rivals[id]?.grudge ?? 0) > 0.5 ||
+            (s.rivalMode === "raids" && id === nem.id)
+          ? "raid"
+          : "no";
+  const ctxFor = (id: string): TurnCtx => ({
     now,
     world: s.villages,
     owned,
-    warOnPlayer: s.rivalMode === "war" && !protectedNow,
-    skipPlayer: new Set(
-      BOTS.filter(
-        (b) => b.id === nem.id || (s.rivals[b.id]?.grudge ?? 0) > 0.05,
-      ).map((b) => b.id),
-    ),
-    held: Object.fromEntries(
-      Object.entries(s.rivals).map(([k, r]) => [k, r.held ?? 0]),
-    ),
-  };
+    stance: stanceOf(id),
+    held,
+    commands: s.commands,
+    intel: s.rivals[id]?.intel ?? {},
+  });
   const fresh = (HOUR * 12) / SPEED; // a plan stays valid for 12 game hours
   const spotlight = BOTS.filter(
     (b) => !s.aiAdvice[b.id] || now - s.aiAdvice[b.id].at > fresh,
@@ -43,9 +50,9 @@ export async function advisorStep(fetchImpl?: typeof fetch): Promise<string> {
     )
     .slice(0, 10);
   for (const bot of spotlight) {
-    const plan = planOptions(bot, ctx);
+    const plan = planOptions(bot, ctxFor(bot.id));
     const options = (plan?.options ?? [])
-      .filter((o) => o.viable)
+      .filter((o) => o.known && o.viable)
       .sort((a, b) => b.score - a.score)
       .slice(0, 6);
     if (options.length < 2) continue; // nothing to decide

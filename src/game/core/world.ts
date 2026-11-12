@@ -132,7 +132,7 @@ export function doctrineUnits(clan: Clan, S: number): Units {
       axe: f(0.3),
       spear: f(0.2),
       sword: f(0.2),
-      ram: f(0.08),
+      ram: f(0.15),
       catapult: f(0.04),
       scout: f(0.06),
     });
@@ -175,7 +175,7 @@ export function botPlan(bot: Clan, dev: number) {
     hiding: L(10, 1.2, 0),
     market,
     stable: d === "turtle" || d === "siege" ? 0 : L(20, 1.3, 0),
-    workshop: d === "siege" ? L(15, 1.4, 0) : 0,
+    workshop: d === "siege" ? L(15, 1.4, 0) : dev > 0.5 ? L(8, 1.6, 0) : 0, // everybody learns to build rams in the end
     timber: L(30, 0.8),
     clay: L(30, 0.8),
     iron: L(30, 0.8),
@@ -185,6 +185,7 @@ export function botPlan(bot: Clan, dev: number) {
   };
   const S = Math.floor((8 + 160 * Math.pow(dev, 1.1)) * (nem ? 1.15 : 1));
   const units = doctrineUnits(bot, S);
+  if (d !== "siege") units.ram = Math.floor(S * 0.1); // a few rams for every style: nobody conquers a walled village without them
   for (const k of UNIT_IDS)
     if (
       !(UNITS[k].requires ?? []).every(

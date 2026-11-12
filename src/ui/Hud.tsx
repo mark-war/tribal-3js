@@ -62,7 +62,7 @@ import {
   tier,
 } from "../game/core/combat";
 import { useGame } from "../game/store";
-import Help from "./Help";
+import Help, { type SimSeed } from "./Help";
 import Incoming from "./Incoming";
 import Market from "./Market";
 import NewGame from "./NewGame";
@@ -191,6 +191,7 @@ export default function Hud() {
   const [left, setLeft] = useState<"buildings" | "army">("buildings");
   const [right, setRight] = useState<"target" | "reports">("target");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [simSeed, setSimSeed] = useState<SimSeed | null>(null); // a report's armies, opened in the simulator
   const [warOpen, setWarOpen] = useState(false);
   const [rankOpen, setRankOpen] = useState(false);
   const [newGameOpen, setNewGameOpen] = useState(false);
@@ -205,12 +206,6 @@ export default function Hud() {
   const [seenId, setSeenId] = useState<string | null>(reports[0]?.id ?? null);
   const [toast, setToast] = useState<string | null>(null);
   const lastToast = useRef(reports[0]?.id);
-  const [helpSeed, setHelpSeed] = useState<{
-    attacker?: Partial<Units>;
-    defender?: Partial<Units>;
-    wall?: number;
-    defSmithy?: number;
-  } | null>(null);
 
   useEffect(() => {
     if (right === "reports") setSeenId(reports[0]?.id ?? null);
@@ -463,6 +458,14 @@ export default function Hud() {
               (t, [k, r]) => t + (k === "_world" ? 0 : (r.held ?? 0)),
               0,
             )}
+          </span>
+        )}
+        {(paladinExists || hero.xp > 0) && (
+          <span
+            title={`Your Paladin: level ${hl}, +${Math.round(hl * HERO_ATTACK_PER_LEVEL * 100)}% attack to armies he leads. XP ${hero.xp}${HERO_XP_LEVELS[hl] ? ` of ${HERO_XP_LEVELS[hl]} for the next level` : " (max level)"}`}
+          >
+            🦸 Paladin Lv {hl}
+            {HERO_XP_LEVELS[hl] ? ` · ${hero.xp}/${HERO_XP_LEVELS[hl]} xp` : ""}
           </span>
         )}
         <button onClick={() => setRankOpen(true)}>🏆 Ranking</button>
@@ -981,10 +984,10 @@ export default function Hud() {
             focusOn(x, y);
             setOpenReport(null);
           }}
-          onLoadSim={(seed) => {
-            setHelpSeed(seed);
-            setOpenReport(null); // close the report
-            setHelpOpen(true); // open Help → Simulator
+          onSimulate={(seed) => {
+            setSimSeed(seed);
+            setOpenReport(null);
+            setHelpOpen(true);
           }}
         />
       )}
@@ -1004,11 +1007,11 @@ export default function Hud() {
       {warOpen && <WarTable seed={warSeed} onClose={() => setWarOpen(false)} />}
       {helpOpen && (
         <Help
+          seed={simSeed}
           onClose={() => {
             setHelpOpen(false);
-            setHelpSeed(null);
+            setSimSeed(null);
           }}
-          seed={helpSeed ?? undefined}
         />
       )}
 

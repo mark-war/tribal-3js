@@ -24,28 +24,6 @@ export const addStats = (a: Stats | undefined, d: Partial<Stats>): Stats => {
   };
 };
 
-/**
- * false = a bot's numbers are only what really happened: its marches and battles (they are counted when the armies land).
- * true  = on top of that, a made-up estimate of off-screen farming and trading is added (see botBaseline).
- */
-const SIMULATED_ACTIVITY = false;
-
-/** Bots farm barbarians and trade among themselves while you are not looking: a deterministic estimate that grows with the world's age and their growth rate. */
-export const botBaseline = (
-  growth: number,
-  ageHours: number,
-  villageCount: number,
-): Stats => {
-  if (!SIMULATED_ACTIVITY) return emptyStats();
-  const a = Math.pow(Math.floor(Math.max(0, ageHours)), 1.12) * growth;
-  return {
-    kills: Math.floor(a * 6),
-    lost: Math.floor(a * 2.5),
-    looted: Math.floor(a * 900),
-    sent: villageCount >= 2 ? Math.floor(a * 700) : 0,
-  };
-};
-
 export interface Row {
   name: string;
   you: boolean;
@@ -62,13 +40,11 @@ export interface Row {
   eliminated?: boolean;
 }
 
-/** The world's leaderboard: you and all 100 bots. */
+/** The world's leaderboard: you and all 100 bots. Every number is REAL: it comes from battles, loot and caravans that actually happened. */
 export function buildRanking(
   world: Record<string, Village>,
   stats: Record<string, Stats>,
-  ageHours: number,
   now: number,
-  rivals: Record<string, { bornAge?: number; banked?: Stats }> = {},
 ): Row[] {
   const rows: Row[] = [];
   const mine = Object.values(world).filter((v) => v.owner === PLAYER);
@@ -88,14 +64,7 @@ export function buildRanking(
   });
   for (const b of BOTS) {
     const vs = botVillages(b, world, now);
-    // Lifetime record = the lives it has already lived (banked when it was wiped out) + the current life, which only counts while it owns a village.
-    const rs = rivals[b.id];
-    const alive = vs.length > 0;
-    const now1 = alive
-      ? botBaseline(b.growth, ageHours - (rs?.bornAge ?? 0), vs.length)
-      : emptyStats();
-    const real = stats[b.name] ?? emptyStats();
-    const old = rs?.banked ?? emptyStats();
+    const st = stats[b.name] ?? emptyStats();
     rows.push({
       name: b.name,
       you: false,
@@ -103,13 +72,13 @@ export function buildRanking(
       color: b.color,
       doctrine: b.doctrine,
       home: b.home,
-      eliminated: !alive,
+      eliminated: vs.length === 0,
       villages: vs.length,
       points: vs.reduce((s, v) => s + v.points, 0),
-      kills: now1.kills + old.kills + real.kills,
-      lost: now1.lost + old.lost + real.lost,
-      looted: now1.looted + old.looted + real.looted,
-      sent: now1.sent + old.sent + real.sent,
+      kills: st.kills,
+      lost: st.lost,
+      looted: st.looted,
+      sent: st.sent,
     });
   }
   return rows;

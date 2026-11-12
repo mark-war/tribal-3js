@@ -59,7 +59,6 @@ export interface Village {
   units: Units;
   goal?: Units; // rivals: the garrison they train back up to
   stationed: Record<string, Units>; // support: troops of OTHER villages standing here, keyed by their home village id
-  razed?: Partial<Record<BuildingId, boolean>>; // buildings a siege reduced to 0: bots never rebuild these
 }
 
 export interface Command {
@@ -72,8 +71,7 @@ export interface Command {
     | "raid"
     | "expand"
     | "strike"
-    | "return"
-    | "botwar";
+    | "return";
   fromId: string;
   toId: string;
   fromXY: [number, number];
@@ -91,6 +89,7 @@ export interface Command {
 
 export interface BattleDetail {
   kind: "battle";
+  luck?: number; // the attack's luck multiplier (0.75..1.25)
   perspective: "attack" | "defense"; // 'defense' is for when rivals can attack you
   outcome: "win" | "loss" | "conquered";
   attacker: {
@@ -121,10 +120,9 @@ export interface BattleDetail {
   wall: { before?: number; after?: number; rams: number };
   loot: Cost;
   carry: number;
-  loyalty?: { before: number; after: number; nobles: number };
+  loyalty?: { before: number; after: number; nobles: number; hit?: number };
   siege?: { building: BuildingId; before: number; after: number };
   hero?: { xp: number; levelUp?: number; fell?: boolean };
-  luck?: number; // the attacker's luck for this march, from -0.25 to +0.25
 }
 export interface ScoutDetail {
   kind: "scout";

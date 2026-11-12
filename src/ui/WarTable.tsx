@@ -22,6 +22,7 @@ import {
 } from "../game/core/economy";
 import { PLAYER, rivalInfo, villageAt } from "../game/core/world";
 import type { BuildingId, Units, UnitId, WaveDraft } from "../game/core/types";
+import { resolveWaves } from "../game/presets";
 import { useGame } from "../game/store";
 import { clock, dur } from "./fmt";
 import { kindIcon } from "./icons";
@@ -67,6 +68,7 @@ export default function WarTable({
     withdraw,
     savePreset,
     deletePreset,
+    updatePreset,
   } = useGame();
   useGame((s) => s.now); // live clock
   const now = Date.now();
@@ -98,15 +100,20 @@ export default function WarTable({
   const [cx, setCx] = useState("");
   const [cy, setCy] = useState("");
   const [presetName, setPresetName] = useState("");
+  const [loadedId, setLoadedId] = useState<string | null>(null); // the preset being edited
+  const [editName, setEditName] = useState("");
 
-  const unitsOf = (w: Wave): Units =>
-    UNIT_IDS.reduce(
+  const resolved = resolveWaves(waves, v.units); // "all" (∞) amounts and noble escorts turned into real numbers
+  const unitsOf = (w: Wave): Units => {
+    const r = resolved[waves.indexOf(w)] ?? ({} as Units);
+    return UNIT_IDS.reduce(
       (o, u) => ({
         ...o,
-        [u]: kindOf(w) === "scout" && u !== "scout" ? 0 : int(w.units[u]),
+        [u]: kindOf(w) === "scout" && u !== "scout" ? 0 : int(r[u]),
       }),
       {} as Units,
     );
+  };
   const alloc = (u: UnitId) => waves.reduce((s, w) => s + unitsOf(w)[u], 0);
   const over = UNIT_IDS.some((u) => alloc(u) > v.units[u]);
   const remaining = UNIT_IDS.reduce(
@@ -155,79 +162,32 @@ export default function WarTable({
   const setWave = (id: string, patch: Partial<Wave>) =>
     setWaves((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
   const setUnit = (id: string, u: UnitId, n: number) => {
-    const others = waves
+    // n = -1 means "all I have"
+    const fixedOthers = waves
       .filter((w) => w.id !== id)
-      .reduce((s, w) => s + unitsOf(w)[u], 0);
+      .reduce((s, w) => s + Math.max(0, w.units[u] ?? 0), 0);
     setWave(id, {
       units: {
         ...waves.find((w) => w.id === id)!.units,
-        [u]: Math.min(int(n), Math.max(0, v.units[u] - others)),
+        [u]:
+          n < 0 ? -1 : Math.min(int(n), Math.max(0, v.units[u] - fixedOthers)),
       },
     });
   };
-  const fit = (ws: Wave[]): Wave[] => {
-    // clamp a preset to what is actually at home
-    const left = { ...v.units };
-    return ws.map((w) => ({
-      ...w,
-      units: Object.fromEntries(
-        UNIT_IDS.map((u) => {
-          const n = Math.min(int(w.units[u]), left[u]);
-          left[u] -= n;
-          return [u, n];
-        }),
-      ) as Partial<Units>,
-    }));
-  };
-  const have = (u: UnitId) => v.units[u];
-  const BUILT_IN: { name: string; own?: boolean; build: () => Wave[] }[] = [
-    {
-      name: "🛡 Garrison",
-      own: true,
-      build: () => [
-        mk(
-          Object.fromEntries(
-            UNIT_IDS.filter(
-              (u) => UNITS[u].role === "defense" || UNITS[u].role === "hybrid",
-            ).map((u) => [u, have(u)]),
-          ),
-          "support",
-        ),
-      ],
-    },
-    {
-      name: "⚔ Strike",
-      build: () => [mk(Object.fromEntries(OFFENSE.map((u) => [u, have(u)])))],
-    },
-    {
-      name: "🐎 Raid",
-      build: () => [mk({ light: have("light"), mounted: have("mounted") })],
-    },
-    {
-      name: "🔍 Scout ×3",
-      build: () => [mk({ scout: Math.min(3, have("scout")) }, "scout")],
-    },
-    {
-      name: "👑 Noble train",
-      build: () => {
-        const n = Math.min(4, have("noble"));
-        const escort = Math.min(have("axe"), n * 15); // every noble walks in with axemen: alone he dies on the base defense
-        const clear = Object.fromEntries(
-          OFFENSE.map((u) => [u, u === "axe" ? have(u) - escort : have(u)]),
-        );
-        return [
-          mk(clear, "attack", 0),
-          ...Array.from({ length: n }, (_, i) =>
-            mk(
-              { noble: 1, axe: Math.floor(escort / Math.max(1, n)) },
-              "attack",
-              0.5 + i * 0.3,
-            ),
-          ),
-        ];
-      },
-    },
-  ];
+  const draftWaves = (): WaveDraft[] =>
+    waves
+      .filter((w) => UNIT_IDS.some((u) => (w.units[u] ?? 0) !== 0))
+      .map(({ id, ...w }) => ({
+        ...w,
+        kind: kindOf({ id, ...w }),
+        units: Object.fromEntries(
+          UNIT_IDS.filter((u) => (w.units[u] ?? 0) !== 0).map((u) => [
+            u,
+            w.units[u],
+          ]),
+        ) as Partial<Units>,
+      }));
+  const loaded = presets.find((p) => p.id === loadedId) ?? null;
 
   const lookup = () => {
     const x = int(cx),
@@ -337,61 +297,85 @@ export default function WarTable({
             </div>
 
             <div className="wcard">
-              <b>Presets</b>
+              <b>Presets</b>{" "}
+              <small>
+                click to load · ∞ = "all I have", so they stay up to date as
+                your army grows
+              </small>
               <div>
-                {BUILT_IN.filter((p) => !!p.own === ownT).map((p) => (
-                  <span
-                    key={p.name}
-                    className="chip"
-                    onClick={() => setWaves(fit(p.build()))}
-                  >
-                    {p.name}
-                  </span>
-                ))}
-                {presets.map((p) => (
-                  <span
-                    key={p.id}
-                    className="chip"
-                    onClick={() =>
-                      setWaves(fit(p.waves.map((w) => ({ ...w, id: uid() }))))
-                    }
-                  >
-                    ⭐ {p.name}
+                {presets
+                  .filter(
+                    (p) => p.waves.every((w) => w.kind === "support") === ownT,
+                  )
+                  .map((p) => (
                     <span
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deletePreset(p.id);
+                      key={p.id}
+                      className={`chip${loadedId === p.id ? " on" : ""}`}
+                      onClick={() => {
+                        setWaves(p.waves.map((w) => ({ ...w, id: uid() })));
+                        setLoadedId(p.id);
+                        setEditName(p.name);
                       }}
                     >
-                      {" "}
-                      ✕
+                      {p.name}
                     </span>
-                  </span>
-                ))}
+                  ))}
               </div>
+              {loaded && (
+                <div
+                  className="row"
+                  style={{
+                    justifyContent: "flex-start",
+                    gap: 6,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span>✏️ Editing</span>
+                  <input
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    style={{ width: 130 }}
+                  />
+                  <button
+                    disabled={!draftWaves().length}
+                    title="Replace this preset with the waves below"
+                    onClick={() =>
+                      updatePreset(loaded.id, {
+                        name: editName.trim() || loaded.name,
+                        waves: draftWaves(),
+                      })
+                    }
+                  >
+                    💾 Update
+                  </button>
+                  <button
+                    onClick={() => {
+                      deletePreset(loaded.id);
+                      setLoadedId(null);
+                    }}
+                  >
+                    🗑 Delete
+                  </button>
+                  <button onClick={() => setLoadedId(null)}>Done</button>
+                </div>
+              )}
               <div
                 className="row"
                 style={{ justifyContent: "flex-start", gap: 6 }}
               >
                 <input
-                  placeholder="save current as…"
+                  placeholder="save the waves below as a new preset…"
                   value={presetName}
                   onChange={(e) => setPresetName(e.target.value)}
                 />
                 <button
-                  disabled={!presetName.trim() || !active.length}
+                  disabled={!presetName.trim() || !draftWaves().length}
                   onClick={() => {
-                    savePreset(
-                      presetName.trim(),
-                      active.map(({ id, ...w }) => ({
-                        ...w,
-                        units: unitsOf({ id, ...w }),
-                      })),
-                    );
+                    savePreset(presetName.trim(), draftWaves());
                     setPresetName("");
                   }}
                 >
-                  Save
+                  Save new
                 </button>
               </div>
             </div>
@@ -448,24 +432,39 @@ export default function WarTable({
                   <div className="ugrid">
                     {UNIT_IDS.filter(
                       (k) =>
-                        v.units[k] > 0 &&
+                        (v.units[k] > 0 || (w.units[k] ?? 0) !== 0) &&
                         (kindOf(w) !== "scout" || k === "scout"),
-                    ).map((k) => (
-                      <label key={k}>
-                        <span>
-                          {UNITS[k].name} <small>/{v.units[k]}</small>
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          style={{ width: 58 }}
-                          value={w.units[k] ?? 0}
-                          onChange={(e) =>
-                            setUnit(w.id, k, Number(e.target.value))
-                          }
-                        />
-                      </label>
-                    ))}
+                    ).map((k) => {
+                      const raw = w.units[k] ?? 0;
+                      return (
+                        <label key={k}>
+                          <span>
+                            {UNITS[k].name} <small>/{v.units[k]}</small>
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            style={{ width: 58 }}
+                            value={raw < 0 ? u[k] : raw}
+                            disabled={raw < 0}
+                            onChange={(e) =>
+                              setUnit(w.id, k, Number(e.target.value))
+                            }
+                          />
+                          <button
+                            type="button"
+                            className={raw < 0 ? "on" : ""}
+                            style={{ padding: "0 5px" }}
+                            title="All I have (the preset stays up to date as your army grows)"
+                            onClick={() =>
+                              setUnit(w.id, k, raw < 0 ? u[k] : -1)
+                            }
+                          >
+                            ∞
+                          </button>
+                        </label>
+                      );
+                    })}
                   </div>
                   {u.catapult > 0 && (
                     <div className="row">
@@ -644,22 +643,36 @@ export default function WarTable({
                     </div>
                   );
                 })()}
-              {noblesSent > 0 && (
-                <div
-                  className={
-                    noblesSent < noblesNeeded(loyaltyKnown) ? "warn" : "green"
-                  }
-                >
-                  👑 {noblesNeeded(loyaltyKnown)} noble
-                  {noblesNeeded(loyaltyKnown) > 1 ? "s" : ""} must{" "}
-                  <i>survive</i> to take a village at loyalty{" "}
-                  {Math.round(loyaltyKnown)}
-                  {intelT ? "" : " (assumed — scout to know)"}; you send{" "}
-                  {noblesSent}.
-                  {noblesSent < noblesNeeded(loyaltyKnown) &&
-                    " It will survive this attack with loyalty left."}
-                </div>
-              )}
+              {noblesSent > 0 &&
+                (() => {
+                  const need = noblesNeeded(loyaltyKnown);
+                  const waves = order.filter(
+                    (w) => unitsOf(w).noble > 0,
+                  ).length;
+                  return (
+                    <div
+                      className={
+                        waves < need.min
+                          ? "warn"
+                          : waves >= need.max
+                            ? "green"
+                            : ""
+                      }
+                    >
+                      👑 One noble works per attack and cuts 20–35 loyalty. At
+                      loyalty {Math.round(loyaltyKnown)}
+                      {intelT ? "" : " (assumed — scout to know)"} you need{" "}
+                      {need.min === need.max
+                        ? need.min
+                        : `${need.min}–${need.max}`}{" "}
+                      noble attacks; you have {waves}.
+                      {noblesSent > waves &&
+                        " Extra nobles in the same wave only come home: give each noble its own wave."}
+                      {waves < need.min &&
+                        " It will survive this operation with loyalty left."}
+                    </div>
+                  );
+                })()}
               <button
                 style={{ width: "100%", marginTop: 6 }}
                 disabled={!canSend}

@@ -26,13 +26,9 @@ export default function Ranking({
   const [tab, setTab] = useState<"rank" | "news">("rank");
   useGame((s) => s.now);
   const [key, setKey] = useState<Key>("points");
-  const rows = buildRanking(
-    villages,
-    stats,
-    worldAgeHours(),
-    Date.now(),
-    rivals,
-  ).sort((a, b) => b[key] - a[key] || b.points - a.points);
+  const rows = buildRanking(villages, stats, Date.now()).sort(
+    (a, b) => b[key] - a[key] || b.points - a.points,
+  );
   const me = rows.findIndex((r) => r.you);
   const leader = rows[0];
   return (
@@ -152,9 +148,10 @@ export default function Ranking({
         )}
         {tab === "rank" && (
           <small>
-            Your numbers are exact. A bot's kills, looted and sent are an
-            estimate of its off-screen life (farming barbarians, trading between
-            bots) plus every real event with you.
+            Every number here is real: kills, losses, loot and resources sent
+            come from battles and caravans that actually happened (yours and the
+            bots'). A bot earns nothing while it owns no village; its past lives
+            still count.
           </small>
         )}
       </div>

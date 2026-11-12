@@ -4,8 +4,10 @@ import {
   ATTACK_CLASSES,
   CLASS_ICON,
   CLASS_NAME,
+  HERO_ATTACK_PER_LEVEL,
   SCOUT_KILL,
   SCOUT_TIER_NAME,
+  SMITHY_BONUS,
   noblesNeeded,
 } from "../game/core/combat";
 import { RES } from "../game/core/economy";
@@ -15,6 +17,8 @@ import type {
   ScoutDetail,
   Units,
 } from "../game/core/types";
+import { useGame } from "../game/store";
+import type { SimSeed } from "./Help";
 
 const ICON = { wood: "🪵", clay: "🧱", iron: "⛏️" } as const;
 const sum = (u: Units) => UNIT_IDS.reduce((s, k) => s + u[k], 0);
@@ -103,16 +107,9 @@ function Pin({
 function Battle({
   d,
   onGoto,
-  onLoadSim,
 }: {
   d: BattleDetail;
   onGoto: (x: number, y: number) => void;
-  onLoadSim?: (seed: {
-    attacker?: Partial<Units>;
-    defender?: Partial<Units>;
-    wall?: number;
-    defSmithy?: number;
-  }) => void;
 }) {
   const defending = d.perspective === "defense";
   const p = d.powers;
@@ -131,10 +128,6 @@ function Battle({
         ? { c: "#9f9", t: "⚔️ Victory" }
         : { c: "#ff8a80", t: "💀 Defeat" };
   const nobleUsed = d.loyalty?.nobles ?? 0;
-  const luckNote =
-    d.luck !== undefined
-      ? ` | ${d.luck >= 0 ? "🍀" : "☘"} luck ${d.luck >= 0 ? "+" : ""}${Math.round(d.luck * 100)}%`
-      : "";
 
   return (
     <>
@@ -208,6 +201,14 @@ function Battle({
               .map((k) => `${CLASS_ICON[k]} ${pct(p.shares[k])}`)
               .join("  ")}
           </li>
+          {d.luck !== undefined && (
+            <li>
+              {d.luck >= 1 ? "🍀" : "🌧"} Luck: {defending ? "their" : "your"}{" "}
+              attack counted for <b>×{d.luck.toFixed(2)}</b> (
+              {d.luck >= 1 ? "+" : ""}
+              {Math.round((d.luck - 1) * 100)}%) of its strength.
+            </li>
+          )}
           {known && p.rating && p.defense !== undefined && (
             <>
               <li>
@@ -280,7 +281,6 @@ function Battle({
               )}
             </li>
           )}
-          {luckNote && <li>{luckNote}</li>}
         </ul>
       </div>
 
@@ -312,12 +312,17 @@ function Battle({
           {d.loyalty && (
             <div>
               👑 Loyalty {Math.round(d.loyalty.before)} →{" "}
-              {Math.round(d.loyalty.after)} ({d.loyalty.nobles} noble
-              {d.loyalty.nobles > 1 ? "s" : ""})
+              {Math.round(d.loyalty.after)} (one noble
+              {d.loyalty.hit ? `: −${d.loyalty.hit}` : ""})
               {d.loyalty.after >= 1 && (
                 <span className="warn">
                   {" "}
-                  — {noblesNeeded(d.loyalty.after)} more needed
+                  —{" "}
+                  {(() => {
+                    const n = noblesNeeded(d.loyalty.after);
+                    return n.min === n.max ? n.min : `${n.min}–${n.max}`;
+                  })()}{" "}
+                  more noble attacks needed
                 </span>
               )}
             </div>
@@ -343,22 +348,6 @@ function Battle({
           )}
         </div>
       </div>
-
-      {known && d.defender.before && onLoadSim && (
-        <button
-          style={{ marginTop: 8, width: "100%" }}
-          onClick={() =>
-            onLoadSim({
-              attacker: d.attacker.sent, // optional but handy
-              defender: d.defender.before!,
-              wall: d.wall.before ?? 0,
-              // defSmithy is not stored in the report, so leave it out
-            })
-          }
-        >
-          🧪 Load into Simulator
-        </button>
-      )}
     </>
   );
 }
@@ -366,16 +355,9 @@ function Battle({
 function Scout({
   d,
   onGoto,
-  onLoadSim,
 }: {
   d: ScoutDetail;
   onGoto: (x: number, y: number) => void;
-  onLoadSim?: (seed: {
-    attacker?: Partial<Units>;
-    defender?: Partial<Units>;
-    wall?: number;
-    defSmithy?: number;
-  }) => void;
 }) {
   if (!d.success)
     return (
@@ -492,40 +474,76 @@ function Scout({
           )}
         </div>
       </div>
-      {d.units && onLoadSim && (
-        <button
-          style={{ marginTop: 8, width: "100%" }}
-          onClick={() =>
-            onLoadSim({
-              defender: d.units!,
-              wall: d.wall ?? 0,
-            })
-          }
-        >
-          🧪 Load into Simulator
-        </button>
-      )}
     </>
   );
+}
+
+const OFFENSE_IDS = UNIT_IDS.filter((u) => UNITS[u].role === "offense");
+/** Both armies and the wall of a report, ready for the simulator. A scout report has no attacker, so it gets what you could send from here. */
+function simSeed(
+  d: BattleDetail | ScoutDetail,
+  home?: Partial<Units>,
+): SimSeed | null {
+  if (d.kind === "battle") {
+    if (!d.defender.known || !d.defender.before) return null;
+    const luck = d.luck ?? 1;
+    const raw = d.attacker.bonus / luck; // the bonus in the report includes luck
+    const heroMult =
+      d.attacker.sent.paladin > 0
+        ? 1 + HERO_ATTACK_PER_LEVEL * d.attacker.heroLevel
+        : 1;
+    const smithy = Math.max(
+      0,
+      Math.min(20, Math.round((raw / heroMult - 1) / SMITHY_BONUS)),
+    );
+    const defSmithy = Math.max(
+      0,
+      Math.min(20, Math.round(((d.defender.bonus ?? 1) - 1) / SMITHY_BONUS)),
+    );
+    return {
+      a: d.attacker.sent,
+      d: d.defender.before,
+      wall: d.wall?.before ?? 0,
+      smithy,
+      defSmithy,
+      heroLvl: d.attacker.heroLevel || 1,
+      luck,
+      note: "Loaded from the report (with the luck it had).",
+    };
+  }
+  if (!d.success || !d.units || d.wall === undefined) return null;
+  return {
+    a: home ?? {},
+    d: d.units,
+    wall: d.wall,
+    smithy: 0,
+    defSmithy: 0,
+    heroLvl: 1,
+    note: `Loaded from the scout report of ${d.village}: their troops and wall, with the offense you have at home. Change anything.`,
+  };
 }
 
 export default function ReportView({
   report,
   onClose,
   onGoto,
-  onLoadSim,
+  onSimulate,
 }: {
   report: Report;
   onClose: () => void;
   onGoto: (x: number, y: number) => void;
-  onLoadSim?: (seed: {
-    attacker?: Partial<Units>;
-    defender?: Partial<Units>;
-    wall?: number;
-    defSmithy?: number;
-  }) => void;
+  onSimulate?: (seed: SimSeed) => void;
 }) {
   const d = report.detail;
+  const { villages, activeId } = useGame();
+  const home = villages[activeId]
+    ? (Object.fromEntries(
+        OFFENSE_IDS.map((u) => [u, villages[activeId].units[u]]).filter(
+          ([, n]) => (n as number) > 0,
+        ),
+      ) as Partial<Units>)
+    : undefined;
+  const seed = d ? simSeed(d, home) : null;
   return (
     <div className="modal" onClick={onClose}>
       <div className="box" onClick={(e) => e.stopPropagation()}>
@@ -547,11 +565,15 @@ export default function ReportView({
             </p>
           </div>
         )}
-        {d?.kind === "battle" && (
-          <Battle d={d} onGoto={onGoto} onLoadSim={onLoadSim} />
-        )}
-        {d?.kind === "scout" && (
-          <Scout d={d} onGoto={onGoto} onLoadSim={onLoadSim} />
+        {d?.kind === "battle" && <Battle d={d} onGoto={onGoto} />}
+        {d?.kind === "scout" && <Scout d={d} onGoto={onGoto} />}
+        {seed && onSimulate && (
+          <div style={{ marginTop: 8 }}>
+            <button onClick={() => onSimulate(seed)}>
+              🧪 Open in the simulator
+            </button>{" "}
+            <small>replay it with other troops, wall, smithy or luck</small>
+          </div>
         )}
       </div>
     </div>
