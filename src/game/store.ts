@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { BUILDINGS } from "./config/buildings";
 import { UNIT_IDS, UNITS } from "./config/units";
 import {
@@ -23,10 +23,14 @@ import {
   resolveScout,
 } from "./core/combat";
 import {
+  CANCEL_REFUND,
   MERCHANT_CAPACITY,
   RES,
   SPEED,
+  buildCost,
+  buildTimeMs,
   capacity,
+  recruitTimeMs,
   emptyCost,
   garrison,
   hidingProtect,
@@ -54,8 +58,8 @@ import {
   type Clan,
 } from "./core/world";
 import { addStats, type Stats } from "./core/ranking";
-import type { Advice } from "./core/botbrain";
-import { defendPass, noteFeud, recordScout } from "./core/botwar";
+import { landStrike, type Advice } from "./core/botbrain";
+import { defendPass, recordScout } from "./core/botwar";
 import { luckNote, luckOf } from "./core/luck";
 import {
   PROTECT_POINTS,
@@ -81,9 +85,55 @@ import type {
   UnitId,
   Village,
   WaveDraft,
+  Rally,
 } from "./core/types";
+import {
+  createRally,
+  addPendingJoin,
+  arriveJoin,
+  cancelRally,
+  markLaunched,
+  collectRally,
+  sumUnits,
+  troopCount,
+  joinProblem,
+} from "./core/rally";
 
 export const SAVE_KEY = "tribal-3js-save";
+
+/**
+ * localStorage, but writing at most every 1.5 s. With 100 bots the save is big and the game changes it several times a
+ * second, so saving on every change would waste time; the last state is also written when the page closes.
+ */
+const lazyStorage = (() => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pending: [string, string] | null = null;
+  const has = () => typeof localStorage !== "undefined";
+  const flush = () => {
+    if (pending && has()) {
+      try {
+        localStorage.setItem(pending[0], pending[1]);
+      } catch {
+        /* storage full or blocked */
+      }
+    }
+    pending = null;
+    timer = null;
+  };
+  if (typeof window !== "undefined")
+    window.addEventListener("beforeunload", flush);
+  return {
+    getItem: (k: string) => (has() ? localStorage.getItem(k) : null),
+    removeItem: (k: string) => {
+      pending = null;
+      if (has()) localStorage.removeItem(k);
+    },
+    setItem: (k: string, v: string) => {
+      pending = [k, v];
+      if (!timer) timer = setTimeout(flush, 1500);
+    },
+  };
+})();
 const SAVE_VERSION = 11;
 /** true = if your whole army dies you learn nothing about the defenders; false = a lost battle still shows who beat you. */
 const FOG_OF_WAR = false;
@@ -129,6 +179,7 @@ function freshGame(o: { speed: number; mode: RivalMode; name?: string }) {
     picked: null,
     focus: null,
     view: "village" as const,
+    rallies: {},
   };
 }
 
@@ -181,12 +232,31 @@ interface GameState {
   /** Commit planned waves; each lands exactly at its arriveAt. Returns an error message, or null on success. */
   plan: (orders: PlanOrder[]) => string | null;
   recall: (id: string) => void;
+  /** Cancel the n-th construction in the active village (and later upgrades of that building); most of it comes back. */
+  cancelBuild: (index: number) => void;
+  /** Cancel the n-th training order in the active village; most of it comes back. */
+  cancelRecruit: (index: number) => void;
   /** Send support troops standing in `hostId` (of village `originId`) back home. */
   withdraw: (hostId: string, originId: string) => void;
   /** Send resources from the active village to another of yours. Returns an error message or null. */
   trade: (toId: string, cargo: Cost) => string | null;
   savePreset: (name: string, waves: WaveDraft[]) => void;
   deletePreset: (id: string) => void;
+
+  rallies: Record<string, Rally>;
+
+  startRally: (opts: {
+    targetId: string;
+    startsInMs: number;
+    initialUnits?: Units;
+    maxParticipants?: number;
+    maxTroops?: number;
+    catTarget?: BuildingId;
+  }) => string | null;
+
+  joinRally: (rallyId: string, units: Units) => string | null;
+
+  cancelRally: (rallyId: string) => void;
 }
 
 const name = (id: UnitId) => UNITS[id].name;
@@ -302,7 +372,13 @@ export const useGame = create<GameState>()(
 
       build: (b) => {
         const s = get();
-        const nv = tryBuild(s.villages[s.activeId], b, Date.now());
+        const nv = tryBuild(
+          s.villages[s.activeId],
+          b,
+          Date.now(),
+          s.commands,
+          s.villages,
+        );
         if (nv) set({ villages: { ...s.villages, [s.activeId]: nv } });
       },
       recruit: (u, n) => {
@@ -382,6 +458,69 @@ export const useGame = create<GameState>()(
           commands: [...s.commands, ...cmds],
         });
         return null;
+      },
+
+      cancelBuild: (index) => {
+        const s = get();
+        const now = Date.now();
+        const v = settle(normalizeVillage(s.villages[s.activeId]), now);
+        const job = v.buildQueue[index];
+        if (!job) return;
+        const gone = v.buildQueue.filter(
+          (j, i) => i === index || (i > index && j.building === job.building), // later upgrades of the same building depend on this one
+        );
+        const keep = v.buildQueue.filter((j) => !gone.includes(j));
+        for (const j of gone) {
+          const c = buildCost(j.building, j.level);
+          for (const r of RES)
+            v.resources[r] = Math.min(
+              capacity(v),
+              v.resources[r] + Math.floor(c[r] * CANCEL_REFUND),
+            );
+        }
+        let cursor = index > 0 ? v.buildQueue[index - 1].finishesAt : now; // the jobs behind it move up
+        v.buildQueue = keep.map((j, i) =>
+          i < index
+            ? j
+            : {
+                ...j,
+                finishesAt: (cursor += buildTimeMs(
+                  j.building,
+                  j.level,
+                  v.buildings.main,
+                )),
+              },
+        );
+        set({ villages: { ...s.villages, [v.id]: v } });
+      },
+      cancelRecruit: (index) => {
+        const s = get();
+        const now = Date.now();
+        const v = settle(normalizeVillage(s.villages[s.activeId]), now);
+        const job = v.recruitQueue[index];
+        if (!job) return;
+        for (const r of RES)
+          v.resources[r] = Math.min(
+            capacity(v),
+            v.resources[r] +
+              Math.floor(UNITS[job.unit].cost[r] * job.count * CANCEL_REFUND),
+          );
+        let cursor = index > 0 ? v.recruitQueue[index - 1].finishesAt : now;
+        v.recruitQueue = v.recruitQueue
+          .filter((_, i) => i !== index)
+          .map((j, i) =>
+            i < index
+              ? j
+              : {
+                  ...j,
+                  finishesAt: (cursor +=
+                    recruitTimeMs(
+                      j.unit,
+                      v.buildings[UNITS[j.unit].trainedAt],
+                    ) * j.count),
+                },
+          );
+        set({ villages: { ...s.villages, [v.id]: v } });
       },
 
       recall: (id) => {
@@ -522,10 +661,203 @@ export const useGame = create<GameState>()(
       deletePreset: (id) =>
         set({ presets: get().presets.filter((p) => p.id !== id) }),
 
+      rallies: {},
+
+      startRally: (opts) => {
+        const s = get();
+        const now = Date.now();
+        const host = settle(s.villages[s.activeId], now);
+        const target = s.villages[opts.targetId] ?? s.target;
+
+        if (!target || target.id === host.id)
+          return "Pick a target village first.";
+        if (host.owner !== PLAYER)
+          return "Only your villages can start a rally.";
+        if (host.buildings.rally < 1) return "Build a Rally Point first.";
+        if (target.owner === PLAYER)
+          return "You can't rally against your own village.";
+
+        // Optional: beginner protection check (same as plan)
+
+        const initial = opts.initialUnits ?? emptyUnits();
+        if (troopCount(initial) > 0) {
+          if (UNIT_IDS.some((u) => initial[u] > host.units[u]))
+            return "Not enough troops at home.";
+        }
+
+        const rally = createRally({
+          host,
+          target,
+          now,
+          startsInMs: opts.startsInMs,
+          maxParticipants: opts.maxParticipants,
+          maxTroops: opts.maxTroops ?? 50_000,
+          initialUnits: initial,
+          catTarget: opts.catTarget,
+        });
+
+        // Remove initial troops from host and put them into stationed under host's own id
+        // so collectRally can find them later
+        if (troopCount(initial) > 0) {
+          UNIT_IDS.forEach((u) => (host.units[u] -= initial[u]));
+          const old = host.stationed[host.id] ?? emptyUnits();
+          host.stationed = {
+            ...host.stationed,
+            [host.id]: UNIT_IDS.reduce(
+              (o, u) => ({ ...o, [u]: (old[u] ?? 0) + initial[u] }),
+              {} as Units,
+            ),
+          };
+        }
+
+        set({
+          villages: { ...s.villages, [host.id]: host },
+          rallies: { ...s.rallies, [rally.id]: rally },
+        });
+        return null;
+      },
+
+      joinRally: (rallyId, units) => {
+        const s = get();
+        const now = Date.now();
+        const rally = s.rallies[rallyId];
+        if (!rally || rally.status !== "open")
+          return "That rally is no longer open.";
+
+        const from = settle(s.villages[s.activeId], now);
+        if (from.owner !== PLAYER || from.id === rally.hostId)
+          return "Invalid village.";
+
+        const host = s.villages[rally.hostId];
+        if (!host || host.owner !== PLAYER) return "Host village is gone.";
+
+        const ms = travelMs([from.x, from.y], [host.x, host.y], units);
+        const problem = joinProblem(rally, from.id, units, ms, now);
+        if (problem) return problem;
+
+        if (UNIT_IDS.some((u) => units[u] > from.units[u]))
+          return "Not enough troops at home.";
+
+        // Subtract troops and create a real support march
+        UNIT_IDS.forEach((u) => (from.units[u] -= units[u]));
+
+        const cmd: Command = {
+          id: crypto.randomUUID(),
+          kind: "support",
+          fromId: from.id,
+          toId: host.id,
+          fromXY: [from.x, from.y],
+          toXY: [host.x, host.y],
+          units: { ...units },
+          loot: emptyCost(),
+          departAt: now,
+          arriveAt: now + ms,
+          // mark it as a rally contribution
+          rallyId: rally.id, // ← you will need to add this optional field on Command
+        };
+
+        const updated = addPendingJoin(rally, from.id, units);
+
+        set({
+          villages: { ...s.villages, [from.id]: from },
+          commands: [...s.commands, cmd],
+          rallies: { ...s.rallies, [rally.id]: updated },
+        });
+        return null;
+      },
+
+      cancelRally: (rallyId) => {
+        const s = get();
+        const now = Date.now();
+        const rally = s.rallies[rallyId];
+        if (!rally || rally.status !== "open") return;
+
+        const villages = { ...s.villages };
+        const commands = [...s.commands];
+        const host = villages[rally.hostId];
+
+        // 1. Return troops that already arrived at the host
+        if (host && host.owner === PLAYER) {
+          const settled = settle(normalizeVillage(host), now);
+          const stationed = { ...settled.stationed };
+
+          for (const join of rally.joins) {
+            const stack = stationed[join.villageId];
+            if (!stack) continue;
+
+            // Create a return march back to the original village
+            const origin = villages[join.villageId];
+            if (origin && origin.owner === PLAYER) {
+              commands.push({
+                id: crypto.randomUUID(),
+                kind: "return",
+                fromId: host.id,
+                toId: join.villageId,
+                fromXY: [host.x, host.y],
+                toXY: [origin.x, origin.y],
+                units: { ...stack },
+                loot: emptyCost(),
+                departAt: now,
+                arriveAt:
+                  now + travelMs([host.x, host.y], [origin.x, origin.y], stack),
+              });
+            }
+
+            delete stationed[join.villageId];
+          }
+
+          villages[host.id] = { ...settled, stationed };
+        }
+
+        // 2. Cancel / turn around pending support marches that belong to this rally
+        for (let i = commands.length - 1; i >= 0; i--) {
+          const c = commands[i];
+          if (
+            c.kind === "support" &&
+            c.rallyId === rallyId &&
+            c.arriveAt > now
+          ) {
+            // Turn them around immediately
+            const elapsed = Math.max(0, now - c.departAt);
+            const f = Math.min(1, elapsed / (c.arriveAt - c.departAt || 1));
+            const here: [number, number] = [
+              c.fromXY[0] + (c.toXY[0] - c.fromXY[0]) * f,
+              c.fromXY[1] + (c.toXY[1] - c.fromXY[1]) * f,
+            ];
+
+            commands[i] = {
+              ...c,
+              id: crypto.randomUUID(),
+              kind: "return",
+              fromId: c.toId,
+              toId: c.fromId,
+              fromXY: here,
+              toXY: c.fromXY,
+              loot: emptyCost(),
+              departAt: now,
+              arriveAt: now + elapsed,
+              rallyId: undefined,
+            };
+          }
+        }
+
+        set({
+          villages,
+          commands,
+          rallies: {
+            ...s.rallies,
+            [rallyId]: cancelRally(rally), // from core/rally.ts
+          },
+        });
+      },
+
       /** Called ~4x/sec. Only resolves due commands; villages settle lazily on demand. */
       tick: () => {
         const now = Date.now();
         const s = get();
+        const rallies = { ...s.rallies };
+        let ralliesChanged = false;
+
         // rivals decide first: they may launch raids (lazily: nothing runs while you are away, the raids just resolve in order)
         const myPoints = Object.values(s.villages)
           .filter((v) => v.owner === PLAYER)
@@ -541,23 +873,27 @@ export const useGame = create<GameState>()(
           advice: s.aiAdvice,
           commands: s.commands,
         });
+
         let newsAll = rv.news.length
           ? [...rv.news.map((text) => ({ at: now, text })), ...s.news].slice(
               0,
               60,
             )
           : s.news;
+
         const applyBumps = (base: Record<string, Stats>) => {
           if (!rv.bumps.length) return base;
           const n = { ...base };
           for (const [k, d] of rv.bumps) n[k] = addStats(n[k], d);
           return n;
         };
+
         const adviceLeft = rv.acted.length
           ? Object.fromEntries(
               Object.entries(s.aiAdvice).filter(([k]) => !rv.acted.includes(k)),
             )
           : s.aiAdvice; // a plan is used once
+
         const live = s.commands.filter((c) => {
           if (c.clan && c.kind !== "return") {
             // the village they marched from was taken since: that army never arrives
@@ -572,35 +908,153 @@ export const useGame = create<GameState>()(
           if (c.kind === "raid" && c.fromId === c.toId) return false;
           return true;
         });
+
         const baseEverything = rv.raids.length ? [...live, ...rv.raids] : live;
+
         // bots look at the marches in flight: they reinforce villages about to be hit and call the reinforcements home
         const def = defendPass({
           now,
           villages: { ...s.villages, ...rv.villages },
           commands: baseEverything,
         });
+
         const everything = def.commands.length
           ? [...baseEverything, ...def.commands]
           : baseEverything;
+
         const rvVillages = Object.keys(def.villages).length
           ? { ...rv.villages, ...def.villages }
           : rv.villages;
+
         if (def.news.length)
           newsAll = [
             ...def.news.map((text) => ({ at: now, text })),
             ...newsAll,
           ].slice(0, 60);
+
+        // Mutable working copies — available for both rally launch and command resolution
+        const villages: Record<string, Village> = {
+          ...s.villages,
+          ...rvVillages,
+        };
+        const commands = everything.filter((c) => c.arriveAt > now);
+        const reports = [...s.reports];
+        const worldNews: { at: number; text: string }[] = [];
+        const intel = { ...s.intel };
+        const rivalsNext = { ...rv.rivals };
+        const statsNext = { ...applyBumps(s.stats) };
+        const lostIds = new Set<string>();
+        let heroXp = s.hero.xp;
+
+        const bump = (name: string | null, d: Partial<Stats>) => {
+          if (name && (name === PLAYER || rivalInfo(name)))
+            statsNext[name] = addStats(statsNext[name], d);
+        };
+
+        const count = (u: Units) => UNIT_IDS.reduce((n, k) => n + u[k], 0);
+        const say = (id: string, text: string, detail?: ReportDetail) =>
+          reports.unshift({ id, at: now, text, detail });
+
+        rv.alerts.forEach((x) =>
+          reports.unshift({ id: x.id, at: now, text: x.text }),
+        );
+
+        const releaseSupportOf = (id: string) => {
+          for (const h of Object.values(villages)) {
+            if (!h.stationed?.[id]) continue;
+            const rest = { ...h.stationed };
+            delete rest[id];
+            villages[h.id] = { ...h, stationed: rest };
+          }
+        };
+
+        const provoke = (clan: Clan, amount: number) => {
+          const st = rivalsNext[clan.id] ?? {
+            grudge: 0,
+            nextRaidAt: now + raidIntervalMs(),
+            raids: 0,
+            updatedAt: now,
+          };
+          rivalsNext[clan.id] = {
+            ...st,
+            grudge: Math.min(6, st.grudge + amount),
+            nextRaidAt: Math.min(st.nextRaidAt, now + retaliateDelayMs()),
+          };
+        };
+
+        // ---- Launch rallies whose time has come ----
+        for (const id of Object.keys(rallies)) {
+          const r = rallies[id];
+          if (r.status !== "open" || now < r.startsAt) continue;
+
+          const host = villages[r.hostId] ?? s.villages[r.hostId];
+          if (!host || host.owner !== PLAYER) {
+            rallies[id] = cancelRally(r);
+            ralliesChanged = true;
+            continue;
+          }
+
+          const settledHost = settle(normalizeVillage(host), now);
+          const { host: newHost, taken } = collectRally(settledHost, r);
+          villages[r.hostId] = newHost; // note: villages may not exist yet on early path
+
+          if (taken.length === 0) {
+            rallies[id] = markLaunched(r);
+            ralliesChanged = true;
+            continue;
+          }
+
+          const army = sumUnits(taken.map((j) => j.units));
+          const target =
+            villages[r.targetId] ??
+            s.villages[r.targetId] ??
+            villageAt(r.targetXY[0], r.targetXY[1], now);
+
+          if (!target || target.owner === PLAYER) {
+            // Should return the troops – for now just cancel
+            rallies[id] = cancelRally(r);
+            ralliesChanged = true;
+            continue;
+          }
+
+          const ms = travelMs(
+            [settledHost.x, settledHost.y],
+            [target.x, target.y],
+            army,
+          );
+
+          everything.push({
+            id: crypto.randomUUID(),
+            kind: "attack",
+            fromId: settledHost.id,
+            toId: target.id,
+            fromXY: [settledHost.x, settledHost.y],
+            toXY: [target.x, target.y],
+            units: army,
+            loot: emptyCost(),
+            departAt: now,
+            arriveAt: now + ms,
+            smithy: settledHost.buildings.smithy,
+            catTarget: r.catTarget,
+            rallyJoins: taken, // so we can split survivors later
+          });
+
+          rallies[id] = markLaunched(r);
+          ralliesChanged = true;
+        }
+
         const due = everything.filter((c) => c.arriveAt <= now);
+        const stillGoing = everything.filter((c) => c.arriveAt > now);
+
         if (!due.length) {
           return set({
             now,
-            rivals: rv.rivals,
-            ...(Object.keys(rvVillages).length
-              ? { villages: { ...s.villages, ...rvVillages } }
-              : {}),
-            ...(everything !== s.commands ? { commands: everything } : {}),
+            rivals: rivalsNext,
+            villages,
+            commands: stillGoing,
+            ...(ralliesChanged ? { rallies } : {}),
             ...(rv.news.length || def.news.length ? { news: newsAll } : {}),
-            ...(rv.bumps.length ? { stats: applyBumps(s.stats) } : {}),
+            ...(rv.bumps.length ? { stats: statsNext } : {}),
             ...(rv.acted.length ? { aiAdvice: adviceLeft } : {}),
             ...(rv.alerts.length
               ? {
@@ -616,50 +1070,8 @@ export const useGame = create<GameState>()(
               : {}),
           });
         }
-        const villages = { ...s.villages, ...rvVillages };
-        const commands = everything.filter((c) => c.arriveAt > now);
-        const reports = [...s.reports];
-        const worldNews: { at: number; text: string }[] = []; // what the bots did to each other this tick
-        const intel = { ...s.intel };
-        const rivalsNext = { ...rv.rivals };
-        const statsNext = { ...applyBumps(s.stats) };
-        const lostIds = new Set<string>(); // villages you lose to a noble run this tick
-        const bump = (name: string | null, d: Partial<Stats>) => {
-          if (name && (name === PLAYER || rivalInfo(name)))
-            statsNext[name] = addStats(statsNext[name], d);
-        }; // barbarians keep no score
-        const count = (u: Units) => UNIT_IDS.reduce((n, k) => n + u[k], 0);
-        rv.alerts.forEach((x) =>
-          reports.unshift({ id: x.id, at: now, text: x.text }),
-        );
-        let heroXp = s.hero.xp;
-        const say = (id: string, text: string, detail?: ReportDetail) =>
-          reports.unshift({ id, at: now, text, detail });
-        // When a village changes hands, support that came FROM it and is still standing in other villages belongs to
-        // nobody any more. Dropping it stops those troops from ever "coming home" to the new owner.
-        const releaseSupportOf = (id: string) => {
-          for (const h of Object.values(villages)) {
-            if (!h.stationed?.[id]) continue;
-            const rest = { ...h.stationed };
-            delete rest[id];
-            villages[h.id] = { ...h, stationed: rest };
-          }
-        };
-        const provoke = (clan: Clan, amount: number) => {
-          // hit a clan and it remembers
-          const st = rivalsNext[clan.id] ?? {
-            grudge: 0,
-            nextRaidAt: now + raidIntervalMs(),
-            raids: 0,
-            updatedAt: now,
-          };
-          rivalsNext[clan.id] = {
-            ...st,
-            grudge: Math.min(6, st.grudge + amount),
-            nextRaidAt: Math.min(st.nextRaidAt, now + retaliateDelayMs()),
-          };
-        };
 
+        // ========== RESOLVE DUE COMMANDS ==========
         for (const c of due.sort((a, b) => a.arriveAt - b.arriveAt)) {
           if (
             !c.clan &&
@@ -668,6 +1080,7 @@ export const useGame = create<GameState>()(
             (lostIds.has(c.fromId) || lostIds.has(c.toId))
           )
             continue; // sent by (or to) a village that has just fallen
+
           const goHome = (units: Units, loot = emptyCost()) => {
             if (UNIT_IDS.every((u) => units[u] <= 0)) return;
             commands.push({
@@ -687,7 +1100,6 @@ export const useGame = create<GameState>()(
 
           if (c.kind === "return") {
             const dest = villages[c.toId];
-            // nowhere to return to (the village changed hands): they are lost
             if (
               c.clan ? !dest || dest.owner !== c.clan : dest?.owner !== PLAYER
             )
@@ -720,7 +1132,23 @@ export const useGame = create<GameState>()(
                 {} as Units,
               ),
             };
+
             villages[host.id] = host;
+
+            // Rally contribution arrived
+            if (c.rallyId && s.rallies[c.rallyId]) {
+              const rally = s.rallies[c.rallyId];
+              // Rally contribution arrived
+              if (c.rallyId && rallies[c.rallyId]?.status === "open") {
+                rallies[c.rallyId] = arriveJoin(
+                  rallies[c.rallyId],
+                  c.fromId,
+                  c.units,
+                );
+                ralliesChanged = true;
+              }
+            }
+
             if (!c.clan)
               say(
                 c.id,
@@ -774,8 +1202,9 @@ export const useGame = create<GameState>()(
             const defBefore = garrison(tgt);
             const wallBefore = tgt.buildings.wall;
             const loyaltyBefore = tgt.loyalty;
+            const luck = luckOf(c.id); // the attacker's luck, -25%..+25%
             const bonus =
-              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luckOf(c.id)); // luck: the attacker's strength varies by up to ±25%
+              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luck);
             const defBonus = defenseBonusFor(tgt.buildings.smithy);
             const pw = battlePowers(
               c.units,
@@ -816,6 +1245,7 @@ export const useGame = create<GameState>()(
             bump(PLAYER, { kills: fell, lost: killed });
             const detail: BattleDetail = {
               kind: "battle",
+              luck,
               perspective: "defense",
               outcome: conquered
                 ? "conquered"
@@ -914,8 +1344,9 @@ export const useGame = create<GameState>()(
             const tgt = settle(normalizeVillage(tv), c.arriveAt);
             const defBefore = garrison(tgt);
             const wallBefore = tgt.buildings.wall;
+            const luck = luckOf(c.id); // the attacker's luck, -25%..+25%
             const bonus =
-              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luckOf(c.id)); // luck
+              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luck);
             const defBonus = defenseBonusFor(tgt.buildings.smithy); // YOUR village's smithy, for everyone standing in it
             const pw = battlePowers(
               c.units,
@@ -957,6 +1388,7 @@ export const useGame = create<GameState>()(
             const clan = c.clan ?? "Rival";
             const detail: BattleDetail = {
               kind: "battle",
+              luck,
               perspective: "defense",
               outcome: res.attackerWins ? "win" : "loss",
               attacker: {
@@ -1051,118 +1483,24 @@ export const useGame = create<GameState>()(
             continue;
           }
 
-          if (c.kind === "botwar") {
-            // a bot army (the clearing army, or one noble wave) arrives at a barbarian village or another bot's village
-            const att = CLANS.find((k) => k.name === c.clan);
-            if (!att) continue;
-            const base =
-              villages[c.toId] ?? villageAt(c.toXY[0], c.toXY[1], now);
-            if (!base || base.owner === PLAYER || base.owner === att.name) {
-              goHome({ ...c.units, noble: 0 }); // the village changed hands: turn back
-              continue;
-            }
-            const prevOwner = base.owner;
-            const tgt = settle(normalizeVillage(base), c.arriveAt);
-            const defBefore = garrison(tgt);
-            const wallBefore = tgt.buildings.wall;
-            const aBonus =
-              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luckOf(c.id)); // luck
-            const dBonus = defenseBonusFor(tgt.buildings.smithy);
-            const res = resolveBattle(
-              c.units,
-              defBefore,
-              wallBefore,
-              aBonus,
-              dBonus,
-            );
-            tgt.units = survivorsOf(tgt.units, defBefore, res.defenderLeft);
-            tgt.stationed = Object.fromEntries(
-              Object.entries(tgt.stationed).map(([k, u]) => [
-                k,
-                survivorsOf(u, defBefore, res.defenderLeft),
-              ]),
-            );
-            tgt.buildings.wall = res.wallAfter;
-
-            const survivors = { ...res.attackerLeft };
-            const nobles = res.attackerWins ? survivors.noble : 0;
-            survivors.noble = 0; // nobles are consumed
-            let taken = false;
-            if (nobles > 0) {
-              tgt.loyalty -= NOBLE_LOYALTY_HIT; // one hit per attack
-              taken = tgt.loyalty < 1;
-            }
-            const loot = emptyCost();
-            if (res.attackerWins && !taken) {
-              const carry = carryCapacity(survivors);
-              const safe = hidingProtect(tgt.buildings.hiding);
-              for (const r of RES) {
-                const take = Math.min(
-                  Math.max(0, Math.floor(tgt.resources[r]) - safe),
-                  Math.floor(carry / 3),
-                );
-                loot[r] = take;
-                tgt.resources[r] -= take;
-              }
-            }
-            {
-              const killed = count(defBefore) - count(res.defenderLeft),
-                fell = count(c.units) - count(res.attackerLeft);
-              bump(att.name, {
-                kills: killed,
-                lost: fell,
-                looted: loot.wood + loot.clay + loot.iron,
-              });
-              bump(prevOwner, { kills: fell, lost: killed });
-            }
-            // the victim remembers who hit it
-            const victim = rivalInfo(prevOwner);
-            if (victim)
-              noteFeud(
-                victim.id,
-                att.name,
-                taken ? 3 : res.attackerWins ? 1 : 0.5,
-                now,
-              );
-
-            if (taken) {
-              Object.assign(tgt, {
-                owner: att.name,
-                name: `${att.name} Outpost`,
-                loyalty: 25,
-                units: survivors, // the winning army moves in
-                goal: undefined,
-                buildQueue: [],
-                recruitQueue: [],
-                stationed: {},
-              });
-              const st = rivalsNext[att.id] ?? {
+          if (c.kind === "strike") {
+            // a bot's army (the clearing army, or one noble wave) lands on a barbarian village or on another bot
+            const bot = CLANS.find((k) => k.name === c.clan);
+            if (!bot) continue;
+            const r = landStrike(c, villages, now, bot);
+            Object.assign(villages, r.changed);
+            for (const x of r.commands) commands.push(x);
+            for (const t of r.news) worldNews.push({ at: now, text: t });
+            for (const [k, d] of r.bumps) bump(k, d);
+            if (r.held) {
+              const st = rivalsNext[bot.id] ?? {
                 grudge: 0,
                 nextRaidAt: now + raidIntervalMs(),
                 raids: 0,
                 updatedAt: now,
               };
-              rivalsNext[att.id] = { ...st, held: (st.held ?? 0) + 1 };
-              villages[tgt.id] = tgt;
-              releaseSupportOf(tgt.id); // the old owner's support that came from here is stranded: it is gone
-              worldNews.push({
-                at: now,
-                text: prevOwner
-                  ? `🗡 ${att.name} took ${tgt.id} from ${prevOwner}`
-                  : `🏰 ${att.name} conquered the barbarian village ${tgt.id}`,
-              });
-            } else {
-              if (res.attackerWins) {
-                goHome(survivors, loot);
-                worldNews.push({
-                  at: now,
-                  text: prevOwner
-                    ? `⚔ ${att.name} beat ${prevOwner} at ${tgt.id}`
-                    : `🌾 ${att.name} raided the barbarian village ${tgt.id}`,
-                });
-              }
+              rivalsNext[bot.id] = { ...st, held: (st.held ?? 0) + r.held };
             }
-            villages[tgt.id] = tgt;
             continue;
           }
 
@@ -1329,8 +1667,6 @@ export const useGame = create<GameState>()(
             );
             if (drop > 0) {
               target.buildings[key] = before - drop;
-              if (before - drop <= 0)
-                target.razed = { ...target.razed, [key]: true };
               siege = ` | 🏚 ${BUILDINGS[key].name} ${before}→${before - drop}`;
               siegeD = { building: key, before, after: before - drop };
             }
@@ -1392,6 +1728,7 @@ export const useGame = create<GameState>()(
           }
           const detail: BattleDetail = {
             kind: "battle",
+            luck,
             perspective: "attack",
             outcome: conquered
               ? "conquered"
@@ -1507,7 +1844,9 @@ export const useGame = create<GameState>()(
           }
           villages[target.id] = target;
         }
+
         const stillYours = villages[s.activeId]?.owner === PLAYER; // if the village you were looking at has fallen, switch to another
+
         set({
           now,
           villages,
@@ -1531,6 +1870,7 @@ export const useGame = create<GameState>()(
     }),
     {
       name: SAVE_KEY,
+      storage: createJSONStorage(() => lazyStorage),
       version: SAVE_VERSION,
       onRehydrateStorage: () => (state) => {
         // restore the saved game speed and the world's clock
@@ -1559,6 +1899,7 @@ export const useGame = create<GameState>()(
         aiAdvice: s.aiAdvice,
         view: s.view,
         mode: s.mode,
+        rallies: s.rallies,
       }),
       // Bump SAVE_VERSION whenever the saved shape changes, and add a step here.
       // Steps only ADD missing fields — the player's existing progress is kept.

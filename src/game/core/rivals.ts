@@ -10,25 +10,31 @@ import {
 import {
   RES,
   SPEED,
+  buildCost,
+  buildReqMet,
   garrison,
   meetsReq,
-  popFree,
-  recruitTimeMs,
   settle,
   tryBuild,
+  tryRecruit,
   worldAgeHours,
 } from "./economy";
+import { BUILDINGS } from "../config/buildings";
 import {
   BOTS,
   CLANS,
   PLAYER,
+  botDevFor,
+  botPlan,
   botVillages,
-  doctrineUnits,
+  nearestBarbarian,
   nemesisClan,
+  newcomerVillage,
   normalizeVillage,
   rivalInfo,
   villageAt,
 } from "./world";
+import { addStats, botBaseline } from "./ranking";
 import { botTurn, type Advice } from "./botbrain";
 import {
   NOBLES_PER_RUN,
@@ -52,7 +58,10 @@ export interface RivalState {
   nextPassAt?: number;
   nextActAt?: number;
   held?: number;
-  frozenAge?: number;
+  bornAge?: number;
+  banked?: Stats;
+  respawnAt?: number;
+  lives?: number;
 }
 
 // ---- tuning, in GAME time, so everything stretches with the game speed (at 60× these are real minutes) ----
@@ -63,10 +72,6 @@ export const retaliateDelayMs = () => 0; // how soon a provoked clan hits back: 
 export const volleyGapMs = () => (20 * 60_000) / SPEED; // gap between follow-up retaliation raids (20 game min)
 const grudgeDecayPerMs = () => SPEED / (15 * HOUR); // a grudge fades by 1 every 15 game hours
 const GRUDGE_PER_RAID = 0.4; // grudge spent per retaliation raid (1 grudge is about 2 raids)
-const MIN_SHARE_OF_NEED = 0.25; // a fallback raid is only sent if the force is at least this share of what it would need to win
-const MIN_FALLBACK_POWER = 800; // ...and is at least this much attack (about 6 light cavalry: no more 4-man "raids")
-const BOTS_PER_TURN = 12; // bots that act per world turn (one per game hour); more = a livelier world
-const BOT_ARMY_AGE_HOURS = 360; // a bot's garrison goal doubles after this many game hours of world age (higher = gentler; 1e9 = no growth with age)
 const NOBLE_ESCORT_BOOST = 1.4; // the clearing army is sized bigger when nobles follow it
 /** Beginner protection: for the first 24 game hours (or until you reach 800 points) bots cannot attack you, and you cannot attack them. */
 export const PROTECT_HOURS = 24;
@@ -75,27 +80,14 @@ export const protectionLeftHours = (ageHours: number, points: number) =>
   points >= PROTECT_POINTS ? 0 : Math.max(0, PROTECT_HOURS - ageHours);
 const GROW_EVERY_MS = 20_000; // real ms between two training updates of a rival village
 export const MAX_CATCHUP = 2; // safety bound on raids launched in one step
+export const respawnMs = () => (6 * HOUR) / SPEED; // a wiped-out bot starts again 6 game hours later
 const MAX_RANGE = 120; // fields from a clan village to the nearest village of yours: further than this it does not raid
-export const expandIntervalMs = () => (36 * HOUR) / SPEED; // the rising kingdom sends a noble run about every 36 game hours
+const MIN_SHARE_OF_NEED = 0.25; // a fallback raid is only sent if the force is at least this share of what it would need to win
+const MIN_FALLBACK_POWER = 800; // ...and is at least this much attack (about 6 light cavalry: no more 4-man "raids")
+const BOTS_PER_TURN = 12; // bots that act per world turn (one per game hour); more = a livelier world
+const BOT_ACT_HOURS = 4; // about how many game hours a bot waits between two of its turns
+export const expandIntervalMs = () => (6 * HOUR) / SPEED; // the rising kingdom sends a noble run about every 36 game hours
 const MAX_HOLDINGS = 100; // villages a bot can take on its own
-const BUILD_CAP: Partial<Record<BuildingId, number>> = {
-  timber: 30,
-  clay: 30,
-  iron: 30,
-  warehouse: 30,
-  farm: 30,
-  main: 20,
-  barracks: 20,
-  smithy: 20,
-  stable: 20,
-  workshop: 15,
-  wall: 20,
-  market: 20,
-  academy: 1,
-  statue: 1,
-  rally: 1,
-  hiding: 10,
-};
 
 const h01 = (s: string) => {
   // deterministic "random" from a string
@@ -108,103 +100,108 @@ const h01 = (s: string) => {
 const attackPower = (u: Units) =>
   UNIT_IDS.reduce((s, k) => s + u[k] * UNITS[k].attack, 0);
 
-/** Can this village really send a noble run: Academy + required buildings, and the minimum noble train paid for in full. */
+/** Can this village really send a noble run: Academy (or a developed village), and the minimum noble train paid for. */
 const canSendNobles = (v: Village) =>
   botCanNoble(v) &&
-  RES.every((r) => v.resources[r] >= NOBLES_PER_RUN * botNobleCost(r));
+  RES.every((r) => v.resources[r] >= NOBLES_PER_RUN * botNobleCost(r)) &&
+  (h01(v.id) ?? 0) < MAX_HOLDINGS;
+
+/** What a bot builds, in the order it would like to (like a player: economy first, then army, then the late game). */
+const BUILD_ORDER: BuildingId[] = [
+  "timber",
+  "clay",
+  "iron",
+  "main",
+  "warehouse",
+  "farm",
+  "barracks",
+  "smithy",
+  "stable",
+  "market",
+  "wall",
+  "workshop",
+  "hiding",
+  "academy",
+];
 
 /**
- * Rival villages are alive: once you have touched one (or it has raided you) it is a real village that keeps its losses,
- * and it TRAINS them back like a player would: unit by unit, paying for each, limited by the level of the building that
- * trains it (Barracks, Stable, Workshop). Destroy its Stable and it can never train cavalry again.
+ * A bot village plays by YOUR rules. Every visit it may place up to two construction orders and one training order, through the
+ * same queues, costs, build and training times, requirements and population limit as yours; what it aims for is its plan
+ * (what a competent player of its style has by now). If it runs out of resources it simply waits, if you destroy its Stable it has
+ * to pay to build it again, and a wiped-out army takes real time to train back.
  */
 export function growRival(
   src: Village,
   now: number,
-  world: Record<string, Village> = {},
-  commands: Command[] = [],
+  bornAge = 0,
 ): Village | null {
-  if (!rivalInfo(src.owner) || now - src.updatedAt < GROW_EVERY_MS) return null;
-  const dt = now - src.updatedAt;
-  const v = settle(normalizeVillage(src), now); // production, finished queues
-  const goal = v.goal ?? villageAt(v.x, v.y, now)?.units ?? v.units;
-  // Population rules apply to the bots too: troops at home, in training, marching and standing in other villages all
-  // use this village's farm slots. A bot never trains past the free slots, however big its garrison goal is.
-  let free = popFree(v, commands, world);
-  for (const b of ["barracks", "stable", "workshop"] as const) {
-    const level = v.buildings[b];
-    if (level < 1) continue; // building destroyed → nothing trained there
-    let budget = dt;
-    const wanted = UNIT_IDS.filter(
-      (u) =>
-        UNITS[u].trainedAt === b &&
-        (goal[u] ?? 0) > v.units[u] &&
-        meetsReq(v, u),
-    ).sort((x, y) => goal[y] - goal[x]);
-    for (const u of wanted) {
-      const t = recruitTimeMs(u, level);
-      const affordable = Math.min(
-        ...RES.map((r) => Math.floor(v.resources[r] / UNITS[u].cost[r])),
-      );
-      const room = Math.floor(free / UNITS[u].pop); // farm slots left for this unit type
-      const n = Math.max(
-        0,
-        Math.min(
-          goal[u] - v.units[u],
-          Math.floor(budget / t),
-          affordable,
-          room,
+  const info = rivalInfo(src.owner);
+  if (!info || now - src.updatedAt < GROW_EVERY_MS) return null;
+  const bot = CLANS.find((k) => k.name === src.owner)!;
+  let v = settle(normalizeVillage(src), now); // production and finished orders
+  // what it WANTS is always a little more than a typical player has by now; what it GETS is limited by resources and time
+  const plan = botPlan(
+    bot,
+    Math.min(1, 0.15 + botDevFor(bot, worldAgeHours(now) - bornAge) * 1.4),
+  );
+  const queued = (b: BuildingId) =>
+    v.buildQueue.filter((j) => j.building === b).length;
+  const wantedNow = () =>
+    BUILD_ORDER.filter(
+      (b) =>
+        v.buildings[b] + queued(b) <
+          Math.min(plan.buildings[b], BUILDINGS[b].maxLevel) &&
+        buildReqMet(v, b),
+    );
+  for (let i = 0; i < 2 && v.buildQueue.length < 3; i++) {
+    let built: Village | null = null;
+    for (const b of wantedNow()) {
+      built = tryBuild(v, b, now);
+      if (built) break;
+    } // the first thing it can afford
+    if (!built) break;
+    v = built;
+  }
+  // Soldiers only come out of what is LEFT after saving for the next building (a player who trains everything never builds anything).
+  const next = wantedNow()[0];
+  const pop = (u: Units) =>
+    UNIT_IDS.reduce((n, k) => n + u[k] * UNITS[k].pop, 0);
+  const econ =
+    Object.values(v.buildings).reduce((n, x) => n + x, 0) /
+    Math.max(
+      1,
+      Object.values(plan.buildings).reduce((n, x) => n + x, 0),
+    );
+  const army = pop(v.units) / Math.max(1, pop(plan.units));
+  // keep the army in step with the economy: when it has fallen behind, soldiers come first; otherwise the next building does
+  const reserve =
+    next && army >= econ * 0.8
+      ? buildCost(next, v.buildings[next] + queued(next) + 1)
+      : { wood: 0, clay: 0, iron: 0 };
+  if (v.recruitQueue.length === 0) {
+    const deficit = (u: UnitId) => plan.units[u] - v.units[u];
+    const wants = UNIT_IDS.filter((u) => deficit(u) > 0 && meetsReq(v, u)).sort(
+      (x, y) => deficit(y) * UNITS[y].pop - deficit(x) * UNITS[x].pop,
+    );
+    for (const u of wants) {
+      const afford = Math.min(
+        ...RES.map((r) =>
+          Math.floor(
+            Math.max(0, v.resources[r] - reserve[r]) / UNITS[u].cost[r],
+          ),
         ),
       );
-      if (n <= 0) continue;
-      v.units[u] += n;
-      free -= n * UNITS[u].pop;
-      budget -= n * t;
-      for (const r of RES) v.resources[r] -= n * UNITS[u].cost[r];
-    }
-  }
-  // The village grows like a player's: one upgrade at a time, cheapest level first.
-  // It may also START buildings it lacks (once established), but never one that a siege razed to 0.
-  let cur = v;
-  const clan = CLANS.find((k) => k.name === cur.owner)!;
-  if (cur.buildQueue.length === 0) {
-    const foundable = (id: BuildingId) => {
-      if (cur.buildings.main < 10 || cur.razed?.[id]) return false;
-      if (id === "stable")
-        return ["cavalry", "horde", "balanced"].includes(clan.doctrine);
-      if (id === "workshop") return clan.doctrine === "siege";
-      return ["market", "academy", "hiding", "rally", "statue"].includes(id);
-    };
-    const options = (Object.keys(BUILD_CAP) as BuildingId[])
-      .filter(
-        (id) =>
-          cur.buildings[id] < BUILD_CAP[id]! &&
-          (cur.buildings[id] >= 1 || foundable(id)),
-      )
-      .sort(
-        (x, y) =>
-          cur.buildings[x] / BUILD_CAP[x]! - cur.buildings[y] / BUILD_CAP[y]!,
-      );
-    for (const id of options) {
-      const built = tryBuild(cur, id, now);
-      if (built) {
-        cur = built;
+      const n = Math.min(deficit(u), 10, afford);
+      if (n < 1) continue;
+      const trained = tryRecruit(v, u, n, now); // time, cost and the farm limit all apply
+      if (trained) {
+        v = trained;
         break;
       }
     }
   }
-  // its garrison goal grows with it, and never shrinks
-  const S = Math.floor(
-    (20 +
-      4 * (cur.buildings.main + cur.buildings.barracks + cur.buildings.farm)) *
-      (rivalInfo(cur.owner)!.nemesis ? 1.25 : 1) *
-      (1 + worldAgeHours(now) / BOT_ARMY_AGE_HOURS), // bots keep growing as the world ages, so they can still threaten a big village
-  );
-  const g = doctrineUnits(clan, S);
-  cur.goal = Object.fromEntries(
-    UNIT_IDS.map((u) => [u, Math.max(goal[u] ?? 0, g[u])]),
-  ) as Units;
-  return cur;
+  v.goal = { ...plan.units };
+  return v;
 }
 
 /**
@@ -232,8 +229,9 @@ const STRIKE: UnitId[] = ["axe", "light", "mounted"]; // what raiders are made o
  * A raid is made of troops the source village REALLY has. It brings roughly what it thinks it needs (your weighted defense × a
  * factor × boost), never more than 85% of its strike force, and if that force is not enough to have a go, nobody leaves:
  * returns null and the clan regroups. A clan's first raid is a weak probe.
- * `boost` > 1 sizes the wave up (the clearing army before nobles). `desperate` = a provoked clan short of troops sends
- * whatever can fight, so you still get a retaliation even when you have grown stronger than it.
+ * `boost` > 1 sizes the wave up (the clearing army before nobles). `desperate` = a provoked clan (or your nemesis) that is
+ * too weak to win still sends what it has, but only if that is a real force (offensive units only, enough power, and a
+ * meaningful share of what it would need).
  */
 export function planRaid(
   source: Village,
@@ -302,7 +300,7 @@ export function stepRivals(a: {
   villages: Record<string, Village>;
   protectedPlayer: boolean;
   advice?: Record<string, Advice>;
-  commands?: Command[]; // everything marching: armies away still use their village's farm slots
+  commands?: Command[];
 }): {
   rivals: Record<string, RivalState>;
   raids: Command[];
@@ -332,8 +330,11 @@ export function stepRivals(a: {
   if (a.mode === "off") return done(); // rivals switched off (multiplayer): the world stands still
   for (const v of Object.values(a.villages)) {
     const g =
-      growRival(v, a.now, a.villages, a.commands ?? []) ??
-      growNeutral(v, a.now);
+      growRival(
+        v,
+        a.now,
+        a.rivals[rivalInfo(v.owner)?.id ?? ""]?.bornAge ?? 0,
+      ) ?? growNeutral(v, a.now);
     if (g) changed[g.id] = g;
   } // living villages retrain and regrow
   const world: Record<string, Village> = { ...a.villages, ...changed };
@@ -341,6 +342,7 @@ export function stepRivals(a: {
   if (!owned.length) return done();
   const nem = nemesisClan();
   const ready = !a.protectedPlayer; // beginner protection
+  // everything that launches an attack on you goes through launchWar with this context
   const lc: LaunchCtx = {
     now: a.now,
     world,
@@ -438,8 +440,7 @@ export function stepRivals(a: {
         }
       }
       if (!pick && (provoked || clan.id === nem.id)) {
-        // provoked (or your nemesis) but too weak to win: send whatever can fight anyway, so the pressure never stops
-        // completely once you have outgrown it (never nobles)
+        // provoked (or your nemesis) but too weak to win: send a real force anyway, never a handful of riders and never nobles
         for (const src of mine) {
           const target = nearestTarget(src);
           if (!inRange(src, target)) continue;
@@ -491,32 +492,23 @@ export function stepRivals(a: {
 
   // ---- The world's turn (about every game hour): the few bots that are due act like players ----
   if (a.now >= (out._world?.nextPassAt ?? 0)) {
+    for (const b of BOTS) {
+      // every bot is a real village from now on (no more formula for its home)
+      const homeId = `${b.home[0]}|${b.home[1]}`;
+      if (world[homeId] || out[b.id]?.respawnAt !== undefined) continue;
+      const g = villageAt(b.home[0], b.home[1], a.now);
+      if (g && g.owner === b.name) {
+        changed[g.id] = g;
+        world[g.id] = g;
+      }
+    }
     out._world = {
       ...(out._world ?? { grudge: 0, raids: 0, nextRaidAt: 0 }),
       updatedAt: a.now,
       nextPassAt: a.now + HOUR / SPEED,
     };
-    // villages each bot has taken with nobles (the store counts them when the nobles land)
-    const held: Record<string, number> = Object.fromEntries(
-      BOTS.map((b) => [b.id, out[b.id]?.held ?? 0]),
-    );
-    for (const b of BOTS) {
-      if (
-        out[b.id]?.frozenAge !== undefined ||
-        botVillages(b, world, a.now).length > 0
-      )
-        continue;
-      out[b.id] = {
-        ...(out[b.id] ?? {
-          grudge: 0,
-          raids: 0,
-          updatedAt: a.now,
-          nextRaidAt: a.now,
-        }),
-        frozenAge: worldAgeHours(a.now),
-      };
-      news.push(`☠ ${b.name} has lost its last village and is out of the game`);
-    }
+    const held: Record<string, number> = {};
+    for (const b of BOTS) held[b.id] = out[b.id]?.held ?? 0;
     const busy = new Set(
       CLANS.filter(
         (c) => c.id === nem.id || (out[c.id]?.grudge ?? 0) > 0.05,
@@ -525,7 +517,11 @@ export function stepRivals(a: {
     const warOnPlayer = a.mode === "war" && !a.protectedPlayer;
     const first = (b: { id: string }) =>
       a.startedAt + ((6 + 10 * h01(b.id)) * HOUR) / SPEED;
-    const due = BOTS.filter((b) => a.now >= (out[b.id]?.nextActAt ?? first(b)))
+    const due = BOTS.filter(
+      (b) =>
+        out[b.id]?.respawnAt === undefined &&
+        a.now >= (out[b.id]?.nextActAt ?? first(b)),
+    )
       .sort(
         (p, q) =>
           (out[p.id]?.nextActAt ?? first(p)) -
@@ -560,14 +556,62 @@ export function stepRivals(a: {
       out[bot.id] = {
         ...prev,
         held: (prev.held ?? 0) + r.held,
-        // a bot that is scouting or has a war on its hands looks again sooner than one that just did a big move
         nextActAt:
           a.now +
-          (4 *
+          (BOT_ACT_HOURS *
             HOUR *
             (0.7 + 0.6 * h01(`${bot.id}:act:${Math.floor(a.now / HOUR)}`))) /
             SPEED,
       };
+    }
+    // A bot that has lost its LAST village is out of the game for a while, then it starts AGAIN as a newcomer on a barbarian village.
+    for (const b of BOTS) {
+      const rs = out[b.id];
+      if (botVillages(b, world, a.now).length > 0) {
+        if (rs?.respawnAt !== undefined)
+          out[b.id] = { ...rs, respawnAt: undefined };
+        continue;
+      }
+      if (rs?.respawnAt === undefined) {
+        // it has just been wiped out: bank what this life earned, schedule a restart
+        const base = rs ?? {
+          grudge: 0,
+          raids: 0,
+          updatedAt: a.now,
+          nextRaidAt: a.now,
+        };
+        out[b.id] = {
+          ...base,
+          banked: addStats(
+            rs?.banked,
+            botBaseline(b.growth, worldAgeHours(a.now) - (rs?.bornAge ?? 0)),
+          ),
+          respawnAt: a.now + respawnMs(),
+        };
+        news.push(
+          `☠ ${b.name} has lost its last village and is out of the game`,
+        );
+      } else if (a.now >= rs.respawnAt) {
+        const spot = nearestBarbarian(
+          b.home,
+          a.now,
+          (v) =>
+            (world[v.id]?.owner ?? null) !== null ||
+            owned.some((o) => Math.hypot(o.x - v.x, o.y - v.y) < 20),
+        );
+        if (!spot) continue;
+        const nv = newcomerVillage(spot.x, spot.y, b, a.now);
+        changed[nv.id] = nv;
+        world[nv.id] = nv;
+        out[b.id] = {
+          ...rs,
+          respawnAt: undefined,
+          bornAge: worldAgeHours(a.now),
+          lives: (rs.lives ?? 1) + 1,
+          nextActAt: a.now + (8 * HOUR) / SPEED,
+        };
+        news.push(`🌱 ${b.name} starts again at ${nv.id} as a newcomer`);
+      }
     }
   }
   return done();

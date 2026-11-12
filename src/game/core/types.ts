@@ -1,3 +1,5 @@
+import { RallyJoin } from "./rally";
+
 export type Resource = "wood" | "clay" | "iron";
 export type Cost = Record<Resource, number>;
 export type BuildingId =
@@ -87,6 +89,8 @@ export interface Command {
   clan?: string; // raids: the rival clan sending them
   merchants?: number; // trade caravans: merchants on the road (they are busy until they are back)
   smithy?: number; // origin Smithy level at send time (attack bonus)
+  rallyId?: string; // if this command is a pending join to a rally, the rally's id
+  rallyJoins?: RallyJoin[];
 }
 
 export interface BattleDetail {
@@ -150,6 +154,7 @@ export interface Report {
   at: number;
   text: string;
   detail?: ReportDetail;
+  mine?: boolean;
 }
 
 /** How a unit ATTACKS. Defenders have a separate defense value against each class. */
@@ -187,4 +192,20 @@ export interface PlanOrder {
   units: Units;
   catTarget?: BuildingId;
   arriveAt: number;
+}
+export interface Rally {
+  id: string;
+  hostId: string;
+  targetId: string;
+  targetXY: [number, number];
+  owner: string; // ← clan / player name
+  createdAt: number;
+  startsAt: number; // when the combined army leaves
+  maxParticipants: number; // villages, the host included
+  maxTroops: number; // units (all counted one by one)
+  joins: RallyJoin[]; // troops already waiting in the host village (the host first)
+  pending: RallyJoin[]; // troops still marching to the host
+  catTarget?: BuildingId;
+  status: "open" | "launched" | "cancelled"; // ← useful
+  kind: "raid" | "attack" | "expand";
 }

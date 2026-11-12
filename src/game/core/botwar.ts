@@ -1,4 +1,3 @@
-// core/botwar.ts  (AI branch version)
 // The machinery behind the bots' wars. core/botbrain.ts DECIDES (who to hit, whether to conquer, AI advice); this file
 // EXECUTES it with real marches that take time and can be seen, answered and lost:
 //   * scouting: a bot scouts another bot before attacking it and sizes its army from what the scouts saw
@@ -30,7 +29,7 @@ import type { Command, Units, UnitId, Village } from "./types";
 const HOUR = 3_600_000;
 /** Noble waves needed to take a full-loyalty village (one loyalty hit per wave), plus one spare for losses. */
 export const NOBLES_PER_RUN = Math.ceil(100 / NOBLE_LOYALTY_HIT) + 1;
-export const NOBLE_TRAIN_MAX = 12; // the longest noble train a bot ever sends
+export const NOBLE_TRAIN_MAX = 8; // the longest noble train a bot ever sends
 /**
  * Bots pay this share of the normal noble cost. They train their armies from the same stockpile, so with the full price
  * (a noble costs tens of thousands of each resource) almost no bot ever had enough to send a noble train.
@@ -44,19 +43,19 @@ export const botNobleCost = (r: (typeof RES)[number]) =>
  * on, once its Headquarters (10) and Barracks (5) are developed. Without it no bot gets an Academy until the world is
  * many hours old, so nobody expands onto barbarian villages for a long time.
  */
-export const BOT_ACADEMY_SHORTCUT = false; // true = bots can send nobles with HQ10 + Barracks5, false = they need an Academy
+export const BOT_ACADEMY_SHORTCUT = false;
 export const botCanNoble = (v: Village) =>
   meetsReq(v, "noble") ||
   (BOT_ACADEMY_SHORTCUT && v.buildings.main >= 10 && v.buildings.barracks >= 5);
 const NOBLE_LAG_MS = 1000; // each noble wave lands this long after the previous one
-const ESCORT_SLICE = 0.5; // each noble wave brings this share of the clearing army, so its noble survives
+const ESCORT_SLICE = 1; // each noble wave brings this share of the clearing army, so its noble survives
 const SCOUTS_PER_MISSION = 2;
 const SUPPORT_RANGE = 40; // fields: reinforcements come from villages this close
 const DEFEND_VS_PLAYER = true; // bots also reinforce villages YOU are attacking
 const intelTtlMs = () => (6 * HOUR) / SPEED; // how long a scouting report stays good
 const defendEveryMs = () => (15 * 60_000) / SPEED; // how often bots look at incoming attacks (15 game min)
 const feudHalfLifeMs = () => (6 * HOUR) / SPEED;
-const HOSTILE: readonly string[] = ["raid", "botwar", "attack"]; // marches that can hit a bot village
+const HOSTILE: readonly string[] = ["raid", "strike", "attack"]; // marches that can hit a bot village
 const STRIKE: UnitId[] = ["axe", "light", "mounted"];
 const DEF_POOL: UnitId[] = ["spear", "sword", "archer", "heavy"];
 
@@ -201,7 +200,7 @@ export function sendScouts(c: LaunchCtx, bot: Clan, s: Village, tgt: Village) {
  * wave is ONE noble plus a small escort slice, lands NOBLE_LAG_MS after the previous one and cuts loyalty once.
  * Pays for and removes everything that leaves.
  * Command kinds: against YOU the clearing army is a "raid" and each noble wave an "expand" (your existing resolvers);
- * against barbarians and other bots everything is "botwar".
+ * against barbarians and other bots everything is a "strike" (resolved by landStrike in botbrain.ts).
  */
 export function launchWar(
   c: LaunchCtx,
@@ -236,8 +235,8 @@ export function launchWar(
   put(c, s);
 
   const vsPlayer = tgt.owner === PLAYER;
-  const clearKind: Command["kind"] = vsPlayer ? "raid" : "botwar";
-  const nobleKind: Command["kind"] = vsPlayer ? "expand" : "botwar";
+  const clearKind: Command["kind"] = vsPlayer ? "raid" : "strike";
+  const nobleKind: Command["kind"] = vsPlayer ? "expand" : "strike";
   const ms = travelMs(from, to, army);
   let clearArrive = now + ms;
   let n0 = 0; // when the first noble wave lands
@@ -268,6 +267,7 @@ export function launchWar(
     arriveAt,
     smithy: s.buildings.smithy,
     clan: bot.name,
+    expectOwner: tgt.owner ?? "", // a strike turns back if the village changed hands while the army was on the road
   });
   c.raids.push(mk(id, clearKind, army, clearArrive));
   train.forEach((w, i) =>

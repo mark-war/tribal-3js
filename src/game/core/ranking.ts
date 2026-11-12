@@ -1,7 +1,7 @@
 import { BOTS, PLAYER, botVillages, rivalInfo } from "./world";
 import type { Village } from "./types";
 
-/** What a player has done. Yours is recorded exactly; a bot's is an estimate of its off-screen life PLUS every real event with you. */
+/** What a player has done. Yours is recorded exactly; a bot's is real events (its marches and battles) plus an optional simulated estimate. */
 export interface Stats {
   kills: number;
   lost: number;
@@ -30,11 +30,14 @@ export const addStats = (a: Stats | undefined, d: Partial<Stats>): Stats => {
  */
 const SIMULATED_ACTIVITY = false;
 
-/** Bots farm barbarians and trade among themselves while you are not looking: a deterministic estimate that grows with the world's age and their growth rate. */
+/**
+ * Optional estimate of what a bot does off-screen. It moves once per whole game hour (not every second), and a bot
+ * only "sends resources" once it owns at least two villages to send them between.
+ */
 export const botBaseline = (
   growth: number,
   ageHours: number,
-  villageCount: number,
+  villageCount = 2, // the new rivals.ts calls it with two arguments
 ): Stats => {
   if (!SIMULATED_ACTIVITY) return emptyStats();
   const a = Math.pow(Math.floor(Math.max(0, ageHours)), 1.12) * growth;
@@ -68,7 +71,7 @@ export function buildRanking(
   stats: Record<string, Stats>,
   ageHours: number,
   now: number,
-  rivals: Record<string, { bornAge?: number; banked?: Stats }> = {},
+  rivals: Record<string, { frozenAge?: number }> = {},
 ): Row[] {
   const rows: Row[] = [];
   const mine = Object.values(world).filter((v) => v.owner === PLAYER);
@@ -88,14 +91,12 @@ export function buildRanking(
   });
   for (const b of BOTS) {
     const vs = botVillages(b, world, now);
-    // Lifetime record = the lives it has already lived (banked when it was wiped out) + the current life, which only counts while it owns a village.
-    const rs = rivals[b.id];
-    const alive = vs.length > 0;
-    const now1 = alive
-      ? botBaseline(b.growth, ageHours - (rs?.bornAge ?? 0), vs.length)
-      : emptyStats();
-    const real = stats[b.name] ?? emptyStats();
-    const old = rs?.banked ?? emptyStats();
+    const base = botBaseline(
+      b.growth,
+      Math.min(ageHours, rivals[b.id]?.frozenAge ?? Infinity),
+      vs.length,
+    );
+    const real = stats[b.name] ?? emptyStats(); // a bot that is out of the game stops earning
     rows.push({
       name: b.name,
       you: false,
@@ -103,13 +104,13 @@ export function buildRanking(
       color: b.color,
       doctrine: b.doctrine,
       home: b.home,
-      eliminated: !alive,
+      eliminated: vs.length === 0,
       villages: vs.length,
       points: vs.reduce((s, v) => s + v.points, 0),
-      kills: now1.kills + old.kills + real.kills,
-      lost: now1.lost + old.lost + real.lost,
-      looted: now1.looted + old.looted + real.looted,
-      sent: now1.sent + old.sent + real.sent,
+      kills: base.kills + real.kills,
+      lost: base.lost + real.lost,
+      looted: base.looted + real.looted,
+      sent: base.sent + real.sent,
     });
   }
   return rows;

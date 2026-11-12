@@ -280,7 +280,12 @@ function Battle({
               )}
             </li>
           )}
-          {luckNote && <li>{luckNote}</li>}
+          {d.luck !== undefined && (
+            <div className={d.luck >= 0 ? "green" : "red"}>
+              {d.luck >= 0 ? "🍀" : "☘"} Luck {d.luck >= 0 ? "+" : ""}
+              {Math.round(d.luck * 100)}% on the attacker's strength
+            </div>
+          )} 
         </ul>
       </div>
 

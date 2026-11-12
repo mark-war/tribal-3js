@@ -7,9 +7,20 @@ export interface BuildingDef {
   costFactor: number;
   baseTimeSec: number;
   timeFactor: number;
+  /** Farm slots the building uses at level 1 (0 = none). At level L it uses about pop × popFactor^(L-1) in total. */
+  pop?: number;
+  /** Growth of that population per level; defaults to 1.17 (see core/population.ts). */
+  popFactor?: number;
   /** Needed to construct it the first time (upgrades of an existing building are never blocked). */
   requires?: { building: BuildingId; level: number }[];
 }
+
+/**
+ * The Farm: how many population slots a village has. `base` slots at level 1, growing by `growth` per level
+ * (240 -> about 24,000 at level 30, as in the original Tribal Wars).
+ */
+export const FARM = { base: 240, growth: 1.172103 };
+
 export const BUILDINGS: Record<BuildingId, BuildingDef> = {
   main: {
     name: "Headquarters",
@@ -19,6 +30,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 900,
     timeFactor: 1.2,
+    pop: 5,
   },
   barracks: {
     name: "Barracks",
@@ -28,6 +40,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 1800,
     timeFactor: 1.2,
+    pop: 7,
     requires: [{ building: "main", level: 3 }],
   },
   academy: {
@@ -38,6 +51,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 3600,
     timeFactor: 1.2,
+    pop: 80,
     requires: [
       { building: "main", level: 20 },
       { building: "smithy", level: 20 },
@@ -52,6 +66,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.2,
     baseTimeSec: 600,
     timeFactor: 1.2,
+    pop: 0,
   },
   workshop: {
     name: "Workshop",
@@ -61,6 +76,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 2400,
     timeFactor: 1.2,
+    pop: 8,
     requires: [
       { building: "main", level: 10 },
       { building: "smithy", level: 10 },
@@ -74,6 +90,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.2,
     baseTimeSec: 2400,
     timeFactor: 1.2,
+    pop: 10,
     requires: [{ building: "main", level: 3 }],
   },
   market: {
@@ -84,6 +101,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 1800,
     timeFactor: 1.2,
+    pop: 20,
     requires: [
       { building: "main", level: 3 },
       { building: "warehouse", level: 2 },
@@ -97,6 +115,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.25,
     baseTimeSec: 1800,
     timeFactor: 1.2,
+    pop: 5,
   },
   stable: {
     name: "Stable",
@@ -106,6 +125,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 2400,
     timeFactor: 1.2,
+    pop: 8,
     requires: [
       { building: "main", level: 10 },
       { building: "barracks", level: 5 },
@@ -120,6 +140,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 2000,
     timeFactor: 1.2,
+    pop: 20,
     requires: [
       { building: "main", level: 5 },
       { building: "barracks", level: 1 },
@@ -127,12 +148,13 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
   },
   farm: {
     name: "Farm",
-    desc: "Raises the population cap. Every unit (home, training or away) uses population.",
+    desc: "Raises the population cap. Every unit (home, training or away) and every building level uses population.",
     maxLevel: 30,
     baseCost: { wood: 45, clay: 40, iron: 30 },
     costFactor: 1.28,
     baseTimeSec: 1000,
     timeFactor: 1.2,
+    pop: 0, // the Farm itself takes no slots, so it can always be upgraded
   },
   timber: {
     name: "Timber Camp",
@@ -142,6 +164,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.25,
     baseTimeSec: 900,
     timeFactor: 1.2,
+    pop: 5,
   },
   clay: {
     name: "Clay Pit",
@@ -151,6 +174,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.25,
     baseTimeSec: 900,
     timeFactor: 1.2,
+    pop: 10,
   },
   iron: {
     name: "Iron Mine",
@@ -160,6 +184,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.25,
     baseTimeSec: 1000,
     timeFactor: 1.2,
+    pop: 10,
   },
   warehouse: {
     name: "Warehouse",
@@ -169,6 +194,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.27,
     baseTimeSec: 1020,
     timeFactor: 1.2,
+    pop: 6,
   },
   wall: {
     name: "Wall",
@@ -178,6 +204,7 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.26,
     baseTimeSec: 3600,
     timeFactor: 1.2,
+    pop: 5,
     requires: [{ building: "barracks", level: 1 }],
   },
 };

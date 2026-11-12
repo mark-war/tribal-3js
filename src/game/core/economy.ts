@@ -1,5 +1,6 @@
 import { BUILDINGS, RESOURCE_BUILDING } from "../config/buildings";
 import { UNITS, UNIT_IDS } from "../config/units";
+import { buildingsPop, farmCapAt, upgradePop } from "./population";
 import type {
   BuildingId,
   Command,
@@ -33,19 +34,22 @@ export const prodPerHour = (lvl: number) =>
   (lvl <= 0 ? 5 : 30 * Math.pow(1.163, lvl - 1)) * SPEED;
 export const capacityAt = (warehouseLevel: number) =>
   Math.round(1000 * Math.pow(1.229, warehouseLevel - 1));
-export const popCapAt = (farmLevel: number) =>
-  Math.round(240 * Math.pow(1.172, farmLevel - 1));
+
+// ---- Population: slots from the Farm, used by troops AND by buildings (rules and numbers: config/buildings.ts) ----
+/** Slots a village has with its Farm at `farmLevel` (config: FARM in config/buildings.ts). */
+export const popCapAt = farmCapAt;
 export const popCap = (v: Village) => popCapAt(v.buildings.farm);
 /**
- * Population a village is responsible for: its own troops at home, in training, on the road, and its troops
- * stationed as SUPPORT in other villages (they eat the home farm, not the host's).
+ * Population a village is responsible for: the slots its BUILDINGS use (queued upgrades included, they reserve their slots),
+ * its own troops at home, in training, on the road, and its troops stationed as SUPPORT in other villages (they eat the
+ * home farm, not the host's).
  */
 export function popUsed(
   v: Village,
   commands: Command[] = [],
   villages: Record<string, Village> = {},
 ) {
-  let n = 0;
+  let n = buildingsPop(v);
   for (const u of UNIT_IDS) n += v.units[u] * UNITS[u].pop;
   for (const j of v.recruitQueue) n += j.count * UNITS[j.unit].pop;
   for (const c of commands)
@@ -175,16 +179,32 @@ export const buildReqMet = (v: Village, id: BuildingId) =>
     (r) => v.buildings[r.building] >= r.level,
   );
 
+/** The level the next upgrade of `id` would take it to (queued upgrades counted). */
+export const nextBuildLevel = (v: Village, id: BuildingId) =>
+  v.buildings[id] + v.buildQueue.filter((j) => j.building === id).length + 1;
+
+/** Farm slots the next upgrade of `id` needs (0 for the Farm, the Rally Point and anything without `pop`). */
+export const buildPopNeeded = (v: Village, id: BuildingId) =>
+  upgradePop(id, nextBuildLevel(v, id));
+
+/**
+ * Queue an upgrade. It needs the resources AND free farm slots for the extra population the new level takes (the Farm itself
+ * takes none, so it can always be upgraded: that is how you get out of a full farm). Pass `commands` and `villages` when you
+ * have them, so armies that are away and support standing elsewhere count toward the slots.
+ */
 export function tryBuild(
   src: Village,
   id: BuildingId,
   now: number,
+  commands: Command[] = [],
+  villages: Record<string, Village> = {},
 ): Village | null {
   const v = settle(src, now);
   if (!buildReqMet(v, id)) return null;
-  const pending = v.buildQueue.filter((j) => j.building === id).length;
-  const level = v.buildings[id] + pending + 1;
+  const level = nextBuildLevel(v, id);
   if (level > BUILDINGS[id].maxLevel || v.buildQueue.length >= 3) return null;
+  const needPop = upgradePop(id, level);
+  if (needPop > 0 && needPop > popFree(v, commands, villages)) return null; // farm too full for this upgrade
   const cost = buildCost(id, level);
   if (!canAfford(v.resources, cost)) return null;
   pay(v, cost);
@@ -295,5 +315,6 @@ export function popBreakdown(
     (s, u) => s + sum(u),
     0,
   ); // not counted: they eat their home farm
-  return { home, training, marching, stationedOut, hostedHere };
+  const buildings = buildingsPop(v); // the slots the buildings use (queued upgrades included)
+  return { home, training, marching, stationedOut, hostedHere, buildings };
 }

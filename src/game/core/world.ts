@@ -97,6 +97,14 @@ const DEV_T = 100; // game hours for an average bot to reach about 63%
 export const botDev = (bot: Clan, ageHours: number = worldAgeHours()) =>
   1 - Math.exp(-(ageHours * bot.growth) / DEV_T);
 
+/**
+ * How big bot armies are compared to the original formula.
+ * 1.0 = current strength
+ * 1.35–1.5 = noticeably stronger (recommended if you want them to feel like real players)
+ * 1.8+ = quite aggressive
+ */
+export const BOT_ARMY_MULT = 1.4;
+
 /** The garrison a clan of this doctrine keeps at strength S. */
 export function doctrineUnits(clan: Clan, S: number): Units {
   const f = (share: number) => Math.floor(S * share);
@@ -104,46 +112,46 @@ export function doctrineUnits(clan: Clan, S: number): Units {
   const d = clan.doctrine;
   if (d === "horde")
     Object.assign(u, {
-      axe: f(0.45),
-      spear: f(0.15),
+      axe: f(0.42),
+      spear: f(0.18),
       sword: f(0.15),
       light: f(0.12),
-      scout: f(0.06),
+      scout: f(0.05),
     });
   else if (d === "cavalry")
     Object.assign(u, {
-      light: f(0.3),
-      mounted: f(0.12),
-      spear: f(0.25),
-      sword: f(0.1),
-      heavy: f(0.04),
-      scout: f(0.06),
+      light: f(0.28),
+      mounted: f(0.13),
+      spear: f(0.26),
+      sword: f(0.12),
+      heavy: f(0.05),
+      scout: f(0.05),
     });
   else if (d === "turtle")
     Object.assign(u, {
       spear: f(0.3),
-      sword: f(0.3),
-      archer: f(0.2),
-      heavy: f(0.04),
-      scout: f(0.08),
+      sword: f(0.28),
+      archer: f(0.3),
+      heavy: f(0.07),
+      scout: f(0.06),
     });
   else if (d === "siege")
     Object.assign(u, {
-      axe: f(0.3),
-      spear: f(0.2),
+      axe: f(0.28),
+      spear: f(0.22),
       sword: f(0.2),
       ram: f(0.08),
-      catapult: f(0.04),
-      scout: f(0.06),
+      catapult: f(0.05),
+      scout: f(0.05),
     });
   else
     Object.assign(u, {
-      spear: f(0.25),
-      sword: f(0.2),
-      axe: f(0.2),
+      spear: f(0.26),
+      sword: f(0.22),
+      axe: f(0.18),
       archer: f(0.1),
-      light: f(0.08),
-      scout: f(0.06),
+      light: f(0.1),
+      scout: f(0.05),
     });
   return u;
 }
@@ -168,7 +176,7 @@ export function botPlan(bot: Clan, dev: number) {
   const buildings = {
     main,
     barracks: L(20, 1.0),
-    farm: L(30, 0.9),
+    farm: L(30, 0.8),
     smithy,
     rally: 1,
     statue: 0,
@@ -183,7 +191,11 @@ export function botPlan(bot: Clan, dev: number) {
     wall: L(d === "turtle" ? 20 : 15, 1.1, 0),
     academy: main >= 20 && smithy >= 20 && market >= 10 ? 1 : 0,
   };
-  const S = Math.floor((8 + 160 * Math.pow(dev, 1.1)) * (nem ? 1.15 : 1));
+
+  const S = Math.floor(
+    (8 + 180 * Math.pow(dev, 1.15)) * (nem ? 1.2 : 1) * BOT_ARMY_MULT,
+  );
+
   const units = doctrineUnits(bot, S);
   for (const k of UNIT_IDS)
     if (

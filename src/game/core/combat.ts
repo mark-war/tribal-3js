@@ -37,7 +37,7 @@ const scale = (u: Units, keep: number): Units =>
 export const emptyUnits = (): Units =>
   Object.fromEntries(UNIT_IDS.map((id) => [id, 0])) as Units;
 
-const totalAttack = (u: Units) =>
+export const totalAttack = (u: Units) =>
   UNIT_IDS.reduce((s, id) => s + u[id] * UNITS[id].attack, 0);
 
 /** Share of an army's attack power that comes from each class (sums to 1). */
