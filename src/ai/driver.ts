@@ -37,7 +37,6 @@ export async function advisorStep(fetchImpl?: typeof fetch): Promise<string> {
     stance: stanceOf(id),
     held,
     commands: s.commands,
-    intel: s.rivals[id]?.intel ?? {},
   });
   const fresh = (HOUR * 12) / SPEED; // a plan stays valid for 12 game hours
   const spotlight = BOTS.filter(

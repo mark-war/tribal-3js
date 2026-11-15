@@ -980,7 +980,7 @@ export interface SimSeed {
   heroLvl: number;
   luck?: number;
   note?: string;
-}
+} // luck: a fraction, +0.12 = +12%
 
 function Sim({ seed }: { seed?: SimSeed | null }) {
   const [a, setA] = useState<Partial<Units>>(seed?.a ?? { axe: 20, ram: 4 });
@@ -991,9 +991,7 @@ function Sim({ seed }: { seed?: SimSeed | null }) {
   const [smithy, setSmithy] = useState(seed?.smithy ?? 0);
   const [heroLvl, setHeroLvl] = useState(seed?.heroLvl || 1);
   const [defSmithy, setDefSmithy] = useState(seed?.defSmithy ?? 0);
-  const [luckPct, setLuckPct] = useState(
-    Math.round(((seed?.luck ?? 1) - 1) * 100),
-  ); // luck: -25..+25 (% of the attack)
+  const [luckPct, setLuckPct] = useState(Math.round((seed?.luck ?? 0) * 100)); // luck: -25..+25 (% of the attack)
   const att = normalizeUnits(a);
   const def = normalizeUnits(d);
   const bonus = attackBonusFor(smithy, att, heroLvl) * (1 + luckPct / 100);

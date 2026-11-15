@@ -35,15 +35,7 @@ import {
   rivalInfo,
   villageAt,
 } from "./world";
-import {
-  botDefend,
-  botRecallSupport,
-  botTurn,
-  mergeIntel,
-  type Advice,
-  type BotIntel,
-  type Stance,
-} from "./botbrain";
+import { botTurn, type Advice, type Stance } from "./botbrain";
 import type { Stats } from "./ranking";
 import type { BuildingId, Command, Units, UnitId, Village } from "./types";
 
@@ -61,8 +53,7 @@ export interface RivalState {
   bornAge?: number;
   respawnAt?: number;
   lives?: number;
-  intel?: Record<string, BotIntel>;
-  answered?: string[];
+  followUp?: boolean;
 }
 
 // ---- tuning, in GAME time, so everything stretches with the game speed (at 60× these are real minutes) ----
@@ -296,19 +287,6 @@ export function stepRivals(a: {
       : "no";
   };
 
-  // ---- every tick: a threatened bot village calls for help ----
-  const answered = new Set(out._world?.answered ?? []);
-  const help = botDefend(world, a.commands, a.now, answered);
-  if (help.ids.length) {
-    Object.assign(changed, help.changed);
-    Object.assign(world, help.changed);
-    raids.push(...help.commands);
-    out._world = {
-      ...(out._world ?? W0),
-      answered: [...(out._world?.answered ?? []), ...help.ids].slice(-80),
-    };
-  }
-
   // ---- the world's turn (about every game hour) ----
   if (a.now >= (out._world?.nextPassAt ?? 0)) {
     out._world = {
@@ -374,7 +352,6 @@ export function stepRivals(a: {
           bornAge: worldAgeHours(a.now),
           lives: (rs.lives ?? 1) + 1,
           nextActAt: a.now + (8 * HOUR) / SPEED,
-          intel: {},
         };
         news.push(`🌱 ${b.name} starts again at ${nv.id} as a newcomer`);
       }
@@ -391,10 +368,11 @@ export function stepRivals(a: {
     )
       .sort(
         (p, q) =>
+          (out[p.id]?.followUp ? -1 : 1) - (out[q.id]?.followUp ? -1 : 1) ||
           (out[p.id]?.nextActAt ?? first(p)) -
-          (out[q.id]?.nextActAt ?? first(q)),
+            (out[q.id]?.nextActAt ?? first(q)),
       )
-      .slice(0, 6);
+      .slice(0, 8); // a bot whose scouts are back goes first, while its report is fresh
     for (const bot of due) {
       const r = botTurn(bot, {
         now: a.now,
@@ -403,7 +381,6 @@ export function stepRivals(a: {
         stance: stance(bot.id),
         held,
         commands: [...a.commands, ...raids],
-        intel: out[bot.id]?.intel ?? {},
         advice: a.advice?.[bot.id],
       });
       Object.assign(changed, r.changed);
@@ -412,30 +389,29 @@ export function stepRivals(a: {
       news.push(...r.news);
       bumps.push(...r.bumps);
       acted.push(bot.id);
-      r.alerts.forEach((t, i) =>
-        alerts.push({ id: `${bot.id}-${Math.floor(a.now)}-a${i}`, text: t }),
-      );
+      alerts.push(...r.alerts);
       const prev = out[bot.id] ?? { ...W0, nextRaidAt: a.now };
-      let intel = prev.intel;
-      for (const [, tid, info] of r.intel)
-        intel = mergeIntel(intel, tid, info, a.now);
+      const looked = r.commands.filter((c) => c.kind === "scout"); // a bot that sent scouts acts again when they are back, while the report is fresh
+      const normal =
+        a.now +
+        (10 *
+          HOUR *
+          (0.7 + 0.6 * h01(`${bot.id}:act:${Math.floor(a.now / HOUR)}`))) /
+          SPEED;
       out[bot.id] = {
         ...prev,
         held: (prev.held ?? 0) + r.held,
-        intel,
-        nextActAt:
-          a.now +
-          (10 *
-            HOUR *
-            (0.7 + 0.6 * h01(`${bot.id}:act:${Math.floor(a.now / HOUR)}`))) /
-            SPEED,
+        followUp: looked.length > 0,
+        nextActAt: looked.length
+          ? Math.min(
+              normal,
+              Math.max(...looked.map((c) => c.arriveAt)) * 2 -
+                a.now +
+                HOUR / SPEED / 2,
+            )
+          : normal,
       };
     }
-    // support that a bot stationed in its own villages goes home once the danger has passed
-    const home = botRecallSupport(world, [...a.commands, ...raids], a.now);
-    Object.assign(changed, home.changed);
-    Object.assign(world, home.changed);
-    raids.push(...home.commands);
   }
   return done();
 }

@@ -1,3 +1,4 @@
+import type { RallyJoin } from "./rally";
 export type Resource = "wood" | "clay" | "iron";
 export type Cost = Record<Resource, number>;
 export type BuildingId =
@@ -71,6 +72,7 @@ export interface Command {
     | "raid"
     | "expand"
     | "strike"
+    | "rally"
     | "return";
   fromId: string;
   toId: string;
@@ -81,6 +83,8 @@ export interface Command {
   departAt: number;
   arriveAt: number;
   catTarget?: BuildingId; // building the catapults aim at
+  rallyId?: string; // a 'rally' march: troops on their way to the host village of this rally
+  rally?: RallyJoin[]; // a rally's combined army: who sent what (survivors and loot are shared back by it)
   expectOwner?: string; // strikes: who owned the target at launch ('' = barbarians); if it changed, the march turns back
   clan?: string; // raids: the rival clan sending them
   merchants?: number; // trade caravans: merchants on the road (they are busy until they are back)

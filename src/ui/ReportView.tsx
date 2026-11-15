@@ -203,10 +203,13 @@ function Battle({
           </li>
           {d.luck !== undefined && (
             <li>
-              {d.luck >= 1 ? "🍀" : "🌧"} Luck: {defending ? "their" : "your"}{" "}
-              attack counted for <b>×{d.luck.toFixed(2)}</b> (
-              {d.luck >= 1 ? "+" : ""}
-              {Math.round((d.luck - 1) * 100)}%) of its strength.
+              {d.luck >= 0 ? "🍀" : "🌧"} Luck: {defending ? "their" : "your"}{" "}
+              attack counted for{" "}
+              <b>
+                {d.luck >= 0 ? "+" : ""}
+                {Math.round(d.luck * 100)}%
+              </b>{" "}
+              of its strength (×{(1 + d.luck).toFixed(2)}).
             </li>
           )}
           {known && p.rating && p.defense !== undefined && (
@@ -486,8 +489,8 @@ function simSeed(
 ): SimSeed | null {
   if (d.kind === "battle") {
     if (!d.defender.known || !d.defender.before) return null;
-    const luck = d.luck ?? 1;
-    const raw = d.attacker.bonus / luck; // the bonus in the report includes luck
+    const luck = d.luck ?? 0;
+    const raw = d.attacker.bonus / (1 + luck); // the bonus in the report includes luck (a fraction: +0.12 = +12%)
     const heroMult =
       d.attacker.sent.paladin > 0
         ? 1 + HERO_ATTACK_PER_LEVEL * d.attacker.heroLevel
@@ -527,12 +530,12 @@ export default function ReportView({
   report,
   onClose,
   onGoto,
-  onSimulate,
+  onLoadSim,
 }: {
   report: Report;
   onClose: () => void;
   onGoto: (x: number, y: number) => void;
-  onSimulate?: (seed: SimSeed) => void;
+  onLoadSim?: (seed: SimSeed) => void;
 }) {
   const d = report.detail;
   const { villages, activeId } = useGame();
@@ -567,9 +570,9 @@ export default function ReportView({
         )}
         {d?.kind === "battle" && <Battle d={d} onGoto={onGoto} />}
         {d?.kind === "scout" && <Scout d={d} onGoto={onGoto} />}
-        {seed && onSimulate && (
+        {seed && onLoadSim && (
           <div style={{ marginTop: 8 }}>
-            <button onClick={() => onSimulate(seed)}>
+            <button onClick={() => onLoadSim(seed)}>
               🧪 Open in the simulator
             </button>{" "}
             <small>replay it with other troops, wall, smithy or luck</small>
