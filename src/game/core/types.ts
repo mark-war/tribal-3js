@@ -75,7 +75,8 @@ export interface Command {
     | "expand"
     | "strike"
     | "return"
-    | "botwar";
+    | "botwar"
+    | "rally";
   fromId: string;
   toId: string;
   fromXY: [number, number];
@@ -90,7 +91,7 @@ export interface Command {
   merchants?: number; // trade caravans: merchants on the road (they are busy until they are back)
   smithy?: number; // origin Smithy level at send time (attack bonus)
   rallyId?: string; // if this command is a pending join to a rally, the rally's id
-  rallyJoins?: RallyJoin[];
+  rally?: { villageId: string; units: Units }[];
 }
 
 export interface BattleDetail {

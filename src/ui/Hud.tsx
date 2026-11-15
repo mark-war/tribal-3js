@@ -19,6 +19,7 @@ import {
   meetsReq,
   prodPerHour,
   recruitTimeMs,
+  recallWindowMs,
   settle,
   garrison,
   paladinCount,
@@ -28,20 +29,18 @@ import {
   popFree,
   popUsed,
   hidingProtect,
-  worldAgeHours,
-  recallWindowMs,
 } from "../game/core/economy";
-import { PLAYER, nemesisClan, rivalInfo } from "../game/core/world";
-import { protectionLeftHours, type RivalMode } from "../game/core/rivals";
+import { PLAYER, rivalInfo } from "../game/core/world";
+import type { RivalMode } from "../game/core/rivals";
 import type {
   BuildingId,
   Cost,
-  Units,
   UnitId,
   UnitRole,
   Report,
   Village,
   WaveDraft,
+  Units,
 } from "../game/core/types";
 import {
   ATTACK_CLASSES,
@@ -51,15 +50,10 @@ import {
   HERO_XP_LEVELS,
   wallFlat,
   wallMult,
-  attackBonusFor,
-  attackShares,
-  carryCapacity,
   defenseBonusFor,
   defenseRating,
   heroLevel,
   pips,
-  ramsToBreakWall,
-  resolveBattle,
   tier,
 } from "../game/core/combat";
 import { useGame } from "../game/store";
@@ -72,6 +66,7 @@ import QuickSend from "./QuickSend";
 import { kindIcon } from "./icons";
 import ReportView from "./ReportView";
 import WarTable from "./WarTable";
+import RallyPanel from "./RallyPanel";
 
 type Req = { building: BuildingId; level: number };
 type TipState = { x: number; y: number; node: ReactNode } | null;
@@ -195,6 +190,7 @@ export default function Hud() {
     commands,
     reports,
     news,
+    rallies,
     recall,
     cancelBuild,
     cancelRecruit,
@@ -211,15 +207,13 @@ export default function Hud() {
     cursor,
     picked,
     rivals,
-    aiEnabled,
-    setAi,
-    aiStatus,
   } = useGame();
   useGame((s) => s.now); // re-render on tick
   const [left, setLeft] = useState<"buildings" | "army">("buildings");
   const [right, setRight] = useState<"target" | "reports" | "news">("target");
   const [helpOpen, setHelpOpen] = useState(false);
   const [warOpen, setWarOpen] = useState(false);
+  const [rallyOpen, setRallyOpen] = useState(false);
   const [rankOpen, setRankOpen] = useState(false);
   const [newGameOpen, setNewGameOpen] = useState(false);
   const [gx, setGx] = useState("");
@@ -230,20 +224,21 @@ export default function Hud() {
   const [openReport, setOpenReport] = useState<Report | null>(null);
   const [amt, setAmt] = useState<Partial<Record<UnitId, number>>>({});
   const [tip, setTip] = useState<TipState>(null);
-  const [seenId, setSeenId] = useState<string | null>(reports[0]?.id ?? null);
   const [toast, setToast] = useState<Toast>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const lastReportToast = useRef(reports[0]?.id);
+
   const [helpSeed, setHelpSeed] = useState<{
     attacker?: Partial<Units>;
     defender?: Partial<Units>;
     wall?: number;
     defSmithy?: number;
+    smithy?: number;
+    heroLvl?: number;
+    luck?: number;
+    note?: string;
   } | null>(null);
 
-  useEffect(() => {
-    if (right === "reports") setSeenId(reports[0]?.id ?? null);
-  }, [right, reports]);
   // Reports: "unopened" until you click them (kept in localStorage, so it survives a reload).
   const [seenReports, markSeen] = useSeenIds(
     "tribal-seen-reports",
@@ -291,18 +286,10 @@ export default function Hud() {
   const pcap = popCap(v);
   const pb = popBreakdown(v, commands, villages);
   const mineCmds = commands.filter((c) => c.kind !== "raid" && !c.clan);
-  const protLeft = protectionLeftHours(
-    worldAgeHours(),
-    Object.values(villages)
-      .filter((x) => x.owner === PLAYER)
-      .reduce((n, x) => n + x.points, 0),
-  );
   const used = popUsed(v, commands, villages);
   const free = popFree(v, commands, villages);
   const mine = Object.values(villages).filter((x) => x.owner === PLAYER);
   const t = target ? (villages[target.id] ?? target) : null;
-  const idx = reports.findIndex((r) => r.id === seenId);
-  const unread = seenId == null || idx < 0 ? reports.length : idx;
 
   // ---- strategy helpers: own weak spot, attack mix, and a prediction from the last scout report ----
   const paladinExists = paladinCount(villages, commands) > 0;
@@ -487,19 +474,8 @@ export default function Hud() {
           <option value="peace">😴 Peaceful</option>
           <option value="retaliate">🛡 Hit back only</option>
           <option value="raids">⚔ Raids</option>
-          <option value="war">👑 War (like players)</option>
+          <option value="war">🔥 War</option>
         </select>
-        <button
-          title={`AI advisor for the bots (Groq): ${aiStatus}. Needs GROQ_API_KEY in .env.local; the bots work without it.`}
-          onClick={() => setAi(!aiEnabled)}
-        >
-          🧠 {aiEnabled ? "AI on" : "AI off"}
-        </button>
-        {protLeft > 0 && (
-          <span title="Beginner protection: bots can't attack you and you can't attack them (barbarians are fine). It ends after 24 game hours or at 800 points.">
-            🛡 Protected {Math.ceil(protLeft)}h
-          </span>
-        )}
         {view === "world" && cursor && (
           <span title="Tile under the mouse">
             🧭 {cursor.x}|{cursor.y}
@@ -559,6 +535,12 @@ export default function Hud() {
           }}
         >
           ⚔ War Table
+        </button>
+        <button
+          title="Gather troops from several villages into one big army"
+          onClick={() => setRallyOpen(true)}
+        >
+          📯 Rally{rallies.length ? ` (${rallies.length})` : ""}
         </button>
         <button onClick={() => setHelpOpen(true)}>? Help</button>
         <button
@@ -670,21 +652,17 @@ export default function Hud() {
             )}
             {v.buildQueue.map((j, i) => (
               <div key={i}>
-                <div className="row">
-                  <span>
-                    {BUILDINGS[j.building].name} → {j.level}{" "}
-                    <small>({fmt(j.finishesAt - Date.now())})</small>
-                  </span>
-                  {i === v.buildQueue.length - 1 && (
-                    <button
-                      title="Cancel this construction and get the resources back"
-                      style={{ marginLeft: 6 }}
-                      onClick={() => cancelBuild(i)}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
+                {BUILDINGS[j.building].name} → {j.level}{" "}
+                <small>({fmt(j.finishesAt - Date.now())})</small>
+                {i === v.buildQueue.length - 1 && (
+                  <button
+                    title="Cancel this construction and get the resources back"
+                    style={{ marginLeft: 6 }}
+                    onClick={() => cancelBuild(i)}
+                  >
+                    ✕
+                  </button>
+                )}
                 <div className="bar">
                   <i
                     style={{
@@ -706,6 +684,7 @@ export default function Hud() {
                 Buildings {pb.buildings} · at home {pb.home} · training{" "}
                 {pb.training} · marching {pb.marching} · stationed in other
                 villages {pb.stationedOut}
+                {pb.reserve > 0 && <> · held for a rally {pb.reserve}</>}
                 {pb.hostedHere > 0 && (
                   <>
                     {" "}
@@ -808,21 +787,17 @@ export default function Hud() {
             )}
             {v.recruitQueue.map((j, i) => (
               <div key={i}>
-                <div className="row">
-                  <span>
-                    {j.count}× {UNITS[j.unit].name}{" "}
-                    <small>({fmt(j.finishesAt - Date.now())})</small>
-                  </span>
-                  {i === v.recruitQueue.length - 1 && (
-                    <button
-                      title="Cancel this training and get the resources back"
-                      style={{ marginLeft: 6 }}
-                      onClick={() => cancelRecruit(i)}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
+                {j.count}× {UNITS[j.unit].name}{" "}
+                <small>({fmt(j.finishesAt - Date.now())})</small>
+                {i === v.recruitQueue.length - 1 && (
+                  <button
+                    title="Cancel this training and get the resources back"
+                    style={{ marginLeft: 6 }}
+                    onClick={() => cancelRecruit(i)}
+                  >
+                    ✕
+                  </button>
+                )}
                 <div className="bar">
                   <i
                     style={{
@@ -1119,8 +1094,8 @@ export default function Hud() {
           }}
           onLoadSim={(seed) => {
             setHelpSeed(seed);
-            setOpenReport(null); // close the report
-            setHelpOpen(true); // open Help → Simulator
+            setOpenReport(null);
+            setHelpOpen(true);
           }}
         />
       )}
@@ -1138,6 +1113,7 @@ export default function Hud() {
         <Market to={marketTo} onClose={() => setMarketOpen(false)} />
       )}
       {warOpen && <WarTable seed={warSeed} onClose={() => setWarOpen(false)} />}
+      {rallyOpen && <RallyPanel onClose={() => setRallyOpen(false)} />}
       {helpOpen && (
         <Help
           onClose={() => {

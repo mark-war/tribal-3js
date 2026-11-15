@@ -22,17 +22,13 @@ export default function Ranking({
   onClose: () => void;
   onGoto: (x: number, y: number) => void;
 }) {
-  const { villages, stats, news, rivals } = useGame();
+  const { villages, stats, news } = useGame();
   const [tab, setTab] = useState<"rank" | "news">("rank");
   useGame((s) => s.now);
   const [key, setKey] = useState<Key>("points");
-  const rows = buildRanking(
-    villages,
-    stats,
-    worldAgeHours(),
-    Date.now(),
-    rivals,
-  ).sort((a, b) => b[key] - a[key] || b.points - a.points);
+  const rows = buildRanking(villages, stats, worldAgeHours(), Date.now()).sort(
+    (a, b) => b[key] - a[key] || b.points - a.points,
+  );
   const me = rows.findIndex((r) => r.you);
   const leader = rows[0];
   return (

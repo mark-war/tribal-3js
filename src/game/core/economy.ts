@@ -52,9 +52,20 @@ export function popUsed(
   let n = buildingsPop(v);
   for (const u of UNIT_IDS) n += v.units[u] * UNITS[u].pop;
   for (const j of v.recruitQueue) n += j.count * UNITS[j.unit].pop;
-  for (const c of commands)
+  for (const c of commands) {
+    if (c.rally?.length) {
+      // a rally's combined army: each village answers for the troops IT sent
+      for (const j of c.rally)
+        if (j.villageId === v.id)
+          for (const u of UNIT_IDS) n += (j.units[u] ?? 0) * UNITS[u].pop;
+      continue;
+    }
     if ((c.kind === "return" ? c.toId : c.fromId) === v.id)
       for (const u of UNIT_IDS) n += (c.units[u] ?? 0) * UNITS[u].pop;
+  }
+  // troops a village holds back for a rally it hosts wait in its own stationed list (still defending it)
+  const reserve = v.stationed?.[v.id];
+  if (reserve) for (const u of UNIT_IDS) n += (reserve[u] ?? 0) * UNITS[u].pop;
   for (const w of Object.values(villages)) {
     const st = w.id !== v.id ? w.stationed?.[v.id] : undefined;
     if (st) for (const u of UNIT_IDS) n += (st[u] ?? 0) * UNITS[u].pop;
@@ -300,21 +311,38 @@ export function popBreakdown(
     (s, j) => s + j.count * UNITS[j.unit].pop,
     0,
   );
-  const marching = commands.reduce(
-    (s, c) =>
+  const marching = commands.reduce((s, c) => {
+    if (c.rally?.length)
+      return (
+        s +
+        c.rally.reduce(
+          (n, j) => n + (j.villageId === v.id ? sum(j.units) : 0),
+          0,
+        )
+      );
+    return (
       s +
-      ((c.kind === "return" ? c.toId : c.fromId) === v.id ? sum(c.units) : 0),
-    0,
-  );
+      ((c.kind === "return" ? c.toId : c.fromId) === v.id ? sum(c.units) : 0)
+    );
+  }, 0);
   const stationedOut = Object.values(villages).reduce(
     (s, w) =>
       s + (w.id !== v.id && w.stationed?.[v.id] ? sum(w.stationed[v.id]) : 0),
     0,
   );
-  const hostedHere = Object.values(v.stationed ?? {}).reduce(
-    (s, u) => s + sum(u),
+  const reserve = v.stationed?.[v.id] ? sum(v.stationed[v.id]) : 0; // held back for a rally this village hosts
+  const hostedHere = Object.entries(v.stationed ?? {}).reduce(
+    (s, [k, u]) => s + (k === v.id ? 0 : sum(u)),
     0,
   ); // not counted: they eat their home farm
   const buildings = buildingsPop(v); // the slots the buildings use (queued upgrades included)
-  return { home, training, marching, stationedOut, hostedHere, buildings };
+  return {
+    home,
+    training,
+    marching,
+    stationedOut,
+    hostedHere,
+    buildings,
+    reserve,
+  };
 }
