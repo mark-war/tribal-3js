@@ -1801,7 +1801,7 @@ export const useGame = create<GameState>()(
           }
           {
             const hit = CLANS.find((k) => k.name === prevOwner);
-            if (hit) provoke(hit, conquered ? 5 : res.attackerWins ? 1 : 0.6);
+            if (hit) provoke(hit, conquered ? 5 : res.attackerWins ? 2.5 : 1.2);
           } // they will remember this
           if (conquered) {
             if (rivalInfo(target.owner)?.nemesis) {

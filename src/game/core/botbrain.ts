@@ -69,6 +69,7 @@ export interface Advice {
   action: "raid" | "conquer";
   reason: string;
 }
+export type Stance = "no" | "raid" | "conquer";
 export interface TurnCtx {
   now: number;
   world: Record<string, Village>;
@@ -432,7 +433,16 @@ export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
       (s, k) => s + shares[k] * (seen.rating[k] ?? 0),
       0,
     );
-    if (pick.power * 0.85 < (conquer ? 1.3 : 1.15) * weighted) return out; // what the scouts saw is too strong
+
+    const targetIsPlayer = pick.target.owner === PLAYER;
+    const need = targetIsPlayer
+      ? conquer
+        ? 1.15
+        : 1.05 // was ~1.3 / 1.15
+      : conquer
+        ? 1.3
+        : 1.15;
+    if (pick.power * 0.9 < need * weighted) return out; // what the scouts saw is too strong
   }
 
   // --- build the clearing force ---

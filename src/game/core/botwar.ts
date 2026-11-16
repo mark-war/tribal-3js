@@ -213,25 +213,74 @@ export function launchWar(
   const { now } = c;
   const from: [number, number] = [s.x, s.y];
   const to: [number, number] = [tgt.x, tgt.y];
+
+  // 1) Clearing army leaves
   for (const u of UNIT_IDS) s.units[u] -= army[u];
 
-  // one escort slice per noble wave, taken from what is left at home
   const pool = strikePool(bot);
   const train: Units[] = [];
-  for (let i = 0; i < waves; i++) {
-    const w = emptyUnits();
-    for (const u of pool) {
-      const slice = Math.min(
-        Math.floor(s.units[u] / (waves - i)),
-        Math.max(1, Math.ceil(army[u] * ESCORT_SLICE)),
-      );
-      w[u] = Math.max(0, slice);
-      s.units[u] -= w[u];
+
+  if (waves > 0) {
+    // Prefer real infantry escorts
+    const escortOrder: UnitId[] = (
+      ["axe", "spear", "sword", "archer", "light"] as UnitId[]
+    ).filter((u) => pool.includes(u));
+
+    // Target size per noble wave (not tied to ESCORT_SLICE)
+    const vsPlayer = tgt.owner === PLAYER;
+    const isBarb = tgt.owner === null;
+    const perWaveTarget = isBarb ? 24 : vsPlayer ? 20 : 18;
+
+    for (let i = 0; i < waves; i++) {
+      const w = emptyUnits();
+      const wavesLeft = waves - i;
+      let need = perWaveTarget;
+
+      // Fair share of whatever is still at home, but aim for perWaveTarget
+      for (const u of escortOrder) {
+        if (need <= 0) break;
+        const home = s.units[u] ?? 0;
+        if (home <= 0) continue;
+
+        // Don't take more than an equal share of remaining waves
+        const fair = Math.floor(home / wavesLeft);
+        const take = Math.min(home, Math.max(fair, Math.min(need, home)));
+        // Prefer at least a meaningful chunk early; last waves get the rest
+        const give =
+          i < waves - 1
+            ? Math.min(
+                take,
+                need,
+                Math.max(Math.floor(perWaveTarget / escortOrder.length), fair),
+              )
+            : Math.min(home, need);
+
+        w[u] = give;
+        s.units[u] -= give;
+        need -= give;
+      }
+
+      // If still short, top up from any remaining pool units
+      if (need > 0) {
+        for (const u of pool) {
+          if (need <= 0) break;
+          if (w[u] > 0) continue;
+          const home = s.units[u] ?? 0;
+          if (home <= 0) continue;
+          const give = Math.min(home, need, Math.floor(home / wavesLeft));
+          w[u] = give;
+          s.units[u] -= give;
+          need -= give;
+        }
+      }
+
+      w.noble = 1;
+      train.push(w);
     }
-    w.noble = 1;
-    train.push(w);
+
+    for (const r of RES) s.resources[r] -= waves * botNobleCost(r);
   }
-  if (waves) for (const r of RES) s.resources[r] -= waves * botNobleCost(r);
+
   put(c, s);
 
   const vsPlayer = tgt.owner === PLAYER;

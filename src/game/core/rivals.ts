@@ -353,7 +353,7 @@ export function stepRivals(a: {
   };
 
   for (const clan of CLANS.filter(
-    (c) => c.id === nem.id || (out[c.id]?.grudge ?? 0) > 0.05,
+    (c) => c.id === nem.id || (out[c.id]?.grudge ?? 0) > 0.15,
   )) {
     let st: RivalState = out[clan.id] ?? {
       grudge: 0,
@@ -373,13 +373,13 @@ export function stepRivals(a: {
     // 'peace': no attacks on YOU, the world still lives
     const willing = () =>
       a.mode !== "peace" &&
-      (st.grudge > 0.5 ||
+      (st.grudge > 0.15 ||
         ((a.mode === "raids" || a.mode === "war") && clan.id === nem.id));
 
     // A fresh provocation pulls the next raid forward: don't wait out the normal 25-game-hour gap.
     if (
       a.mode !== "peace" &&
-      st.grudge > 0.5 &&
+      st.grudge > 0.15 &&
       st.nextRaidAt > a.now + volleyGapMs()
     )
       st = { ...st, nextRaidAt: a.now + retaliateDelayMs() };
@@ -391,7 +391,7 @@ export function stepRivals(a: {
       a.now >= st.nextRaidAt &&
       launched < MAX_CATCHUP
     ) {
-      const provoked = st.grudge > 0.5;
+      const provoked = st.grudge > 0.15;
       const ref = owned[0];
       const seed = `${clan.id}:${st.raids}`;
       // their villages near you that are still theirs, nearest first: the first one that can really field a raid sends it
