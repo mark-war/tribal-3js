@@ -556,6 +556,28 @@ function WorldTab() {
         are away launches when you come back, with full warning. All of these
         times stretch with the game speed.
       </p>
+      <h3>How bold are they? 🔥</h3>
+      <p>
+        The <b>bot boldness</b> selector in the top bar changes how risky the
+        bots play, never whether they scout first. <b>Calm</b> attacks only with
+        a 30% edge, takes a turn about every 14 game hours and one action at a
+        time; <b>Normal</b> wants a 15% edge, every 10 hours; <b>Aggressive</b>{" "}
+        accepts a 5% edge, every 6 hours, <b>2 attacks at once</b> (from
+        different villages) and goes after you more often; <b>Relentless</b>{" "}
+        attacks at even odds (luck decides), every 4 hours, 3 actions per turn,
+        and always sends noble trains when it can. A bot never sends a second
+        army at a village it is already attacking.
+      </p>
+      <h3>Bot Paladins 🦸</h3>
+      <p>
+        Every bot has a Paladin too (kept as experience, there is no unit to
+        kill). He leads the bot's <b>clearing army</b>: +5% attack per level,
+        and the bot counts that bonus when it decides what it can beat. A won
+        fight gives him xp (more for a conquest) and the <b>World news</b> tells
+        when one levels up. If the army he leads <b>loses, he falls</b> and the
+        bot starts over at level 0. Beat the army with the Paladin and you reset
+        it.
+      </p>
       <h3>When they come for you</h3>
       <ul>
         <li>

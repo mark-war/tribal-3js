@@ -35,7 +35,7 @@ import {
   rivalInfo,
   villageAt,
 } from "./world";
-import { botTurn, type Advice, type Stance } from "./botbrain";
+import { AGGRESSION, botTurn, type Advice, type Stance } from "./botbrain";
 import type { Stats } from "./ranking";
 import type { BuildingId, Command, Units, UnitId, Village } from "./types";
 
@@ -54,6 +54,7 @@ export interface RivalState {
   respawnAt?: number;
   lives?: number;
   followUp?: boolean;
+  heroXp?: number;
 }
 
 // ---- tuning, in GAME time, so everything stretches with the game speed (at 60× these are real minutes) ----
@@ -233,6 +234,7 @@ export function stepRivals(a: {
   protectedPlayer: boolean;
   advice?: Record<string, Advice>;
   commands: Command[];
+  aggression?: number;
 }): {
   rivals: Record<string, RivalState>;
   raids: Command[];
@@ -272,6 +274,13 @@ export function stepRivals(a: {
   const owned = Object.values(world).filter((v) => v.owner === PLAYER);
   if (!owned.length) return done();
   const nem = nemesisClan();
+  const aggr =
+    AGGRESSION[
+      Math.max(
+        0,
+        Math.min(AGGRESSION.length - 1, Math.round(a.aggression ?? 1)),
+      )
+    ];
   const W0: RivalState = {
     grudge: 0,
     raids: 0,
@@ -372,7 +381,10 @@ export function stepRivals(a: {
           (out[p.id]?.nextActAt ?? first(p)) -
             (out[q.id]?.nextActAt ?? first(q)),
       )
-      .slice(0, 8); // a bot whose scouts are back goes first, while its report is fresh
+      .slice(
+        0,
+        [8, 8, 14, 20][Math.max(0, Math.min(3, Math.round(a.aggression ?? 1)))],
+      ); // a bot whose scouts are back goes first, while its report is fresh; bolder worlds let more bots act each hour
     for (const bot of due) {
       const r = botTurn(bot, {
         now: a.now,
@@ -381,6 +393,9 @@ export function stepRivals(a: {
         stance: stance(bot.id),
         held,
         commands: [...a.commands, ...raids],
+        grudge: out[bot.id]?.grudge ?? 0,
+        aggr,
+        heroXp: out[bot.id]?.heroXp ?? 0,
         advice: a.advice?.[bot.id],
       });
       Object.assign(changed, r.changed);
@@ -394,7 +409,7 @@ export function stepRivals(a: {
       const looked = r.commands.filter((c) => c.kind === "scout"); // a bot that sent scouts acts again when they are back, while the report is fresh
       const normal =
         a.now +
-        (10 *
+        (aggr.gapH *
           HOUR *
           (0.7 + 0.6 * h01(`${bot.id}:act:${Math.floor(a.now / HOUR)}`))) /
           SPEED;

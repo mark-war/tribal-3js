@@ -83,6 +83,7 @@ export interface Command {
   departAt: number;
   arriveAt: number;
   catTarget?: BuildingId; // building the catapults aim at
+  heroLevel?: number; // a bot's Paladin (level) marches with this army: +5% attack per level
   rallyId?: string; // a 'rally' march: troops on their way to the host village of this rally
   rally?: RallyJoin[]; // a rally's combined army: who sent what (survivors and loot are shared back by it)
   expectOwner?: string; // strikes: who owned the target at launch ('' = barbarians); if it changed, the march turns back

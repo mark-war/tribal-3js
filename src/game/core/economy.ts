@@ -1,5 +1,6 @@
 import { BUILDINGS, RESOURCE_BUILDING } from "../config/buildings";
 import { UNITS, UNIT_IDS } from "../config/units";
+import { buildingsPop, farmCapAt, upgradePop } from "./population";
 import type {
   BuildingId,
   Command,
@@ -33,24 +34,38 @@ export const prodPerHour = (lvl: number) =>
   (lvl <= 0 ? 5 : 30 * Math.pow(1.163, lvl - 1)) * SPEED;
 export const capacityAt = (warehouseLevel: number) =>
   Math.round(1000 * Math.pow(1.229, warehouseLevel - 1));
-export const popCapAt = (farmLevel: number) =>
-  Math.round(240 * Math.pow(1.172, farmLevel - 1));
+
+// ---- Population: slots from the Farm, used by troops AND by buildings (rules and numbers: config/buildings.ts) ----
+/** Slots a village has with its Farm at `farmLevel` (config: FARM in config/buildings.ts). */
+export const popCapAt = farmCapAt;
 export const popCap = (v: Village) => popCapAt(v.buildings.farm);
 /**
- * Population a village is responsible for: its own troops at home, in training, on the road, and its troops
- * stationed as SUPPORT in other villages (they eat the home farm, not the host's).
+ * Population a village is responsible for: the slots its BUILDINGS use (queued upgrades included, they reserve their slots),
+ * its own troops at home, in training, on the road, and its troops stationed as SUPPORT in other villages (they eat the
+ * home farm, not the host's).
  */
 export function popUsed(
   v: Village,
   commands: Command[] = [],
   villages: Record<string, Village> = {},
 ) {
-  let n = 0;
+  let n = buildingsPop(v);
   for (const u of UNIT_IDS) n += v.units[u] * UNITS[u].pop;
   for (const j of v.recruitQueue) n += j.count * UNITS[j.unit].pop;
-  for (const c of commands)
+  for (const c of commands) {
+    if (c.rally?.length) {
+      // a rally's combined army: each village answers for the troops IT sent
+      for (const j of c.rally)
+        if (j.villageId === v.id)
+          for (const u of UNIT_IDS) n += (j.units[u] ?? 0) * UNITS[u].pop;
+      continue;
+    }
     if ((c.kind === "return" ? c.toId : c.fromId) === v.id)
       for (const u of UNIT_IDS) n += (c.units[u] ?? 0) * UNITS[u].pop;
+  }
+  // troops a village holds back for a rally it hosts wait in its own stationed list (still defending it)
+  const reserve = v.stationed?.[v.id];
+  if (reserve) for (const u of UNIT_IDS) n += (reserve[u] ?? 0) * UNITS[u].pop;
   for (const w of Object.values(villages)) {
     const st = w.id !== v.id ? w.stationed?.[v.id] : undefined;
     if (st) for (const u of UNIT_IDS) n += (st[u] ?? 0) * UNITS[u].pop;
@@ -175,16 +190,32 @@ export const buildReqMet = (v: Village, id: BuildingId) =>
     (r) => v.buildings[r.building] >= r.level,
   );
 
+/** The level the next upgrade of `id` would take it to (queued upgrades counted). */
+export const nextBuildLevel = (v: Village, id: BuildingId) =>
+  v.buildings[id] + v.buildQueue.filter((j) => j.building === id).length + 1;
+
+/** Farm slots the next upgrade of `id` needs (0 for the Farm, the Rally Point and anything without `pop`). */
+export const buildPopNeeded = (v: Village, id: BuildingId) =>
+  upgradePop(id, nextBuildLevel(v, id));
+
+/**
+ * Queue an upgrade. It needs the resources AND free farm slots for the extra population the new level takes (the Farm itself
+ * takes none, so it can always be upgraded: that is how you get out of a full farm). Pass `commands` and `villages` when you
+ * have them, so armies that are away and support standing elsewhere count toward the slots.
+ */
 export function tryBuild(
   src: Village,
   id: BuildingId,
   now: number,
+  commands: Command[] = [],
+  villages: Record<string, Village> = {},
 ): Village | null {
   const v = settle(src, now);
   if (!buildReqMet(v, id)) return null;
-  const pending = v.buildQueue.filter((j) => j.building === id).length;
-  const level = v.buildings[id] + pending + 1;
+  const level = nextBuildLevel(v, id);
   if (level > BUILDINGS[id].maxLevel || v.buildQueue.length >= 3) return null;
+  const needPop = upgradePop(id, level);
+  if (needPop > 0 && needPop > popFree(v, commands, villages)) return null; // farm too full for this upgrade
   const cost = buildCost(id, level);
   if (!canAfford(v.resources, cost)) return null;
   pay(v, cost);
@@ -280,20 +311,38 @@ export function popBreakdown(
     (s, j) => s + j.count * UNITS[j.unit].pop,
     0,
   );
-  const marching = commands.reduce(
-    (s, c) =>
+  const marching = commands.reduce((s, c) => {
+    if (c.rally?.length)
+      return (
+        s +
+        c.rally.reduce(
+          (n, j) => n + (j.villageId === v.id ? sum(j.units) : 0),
+          0,
+        )
+      );
+    return (
       s +
-      ((c.kind === "return" ? c.toId : c.fromId) === v.id ? sum(c.units) : 0),
-    0,
-  );
+      ((c.kind === "return" ? c.toId : c.fromId) === v.id ? sum(c.units) : 0)
+    );
+  }, 0);
   const stationedOut = Object.values(villages).reduce(
     (s, w) =>
       s + (w.id !== v.id && w.stationed?.[v.id] ? sum(w.stationed[v.id]) : 0),
     0,
   );
-  const hostedHere = Object.values(v.stationed ?? {}).reduce(
-    (s, u) => s + sum(u),
+  const reserve = v.stationed?.[v.id] ? sum(v.stationed[v.id]) : 0; // held back for a rally this village hosts
+  const hostedHere = Object.entries(v.stationed ?? {}).reduce(
+    (s, [k, u]) => s + (k === v.id ? 0 : sum(u)),
     0,
   ); // not counted: they eat their home farm
-  return { home, training, marching, stationedOut, hostedHere };
+  const buildings = buildingsPop(v); // the slots the buildings use (queued upgrades included)
+  return {
+    home,
+    training,
+    marching,
+    stationedOut,
+    hostedHere,
+    buildings,
+    reserve,
+  };
 }

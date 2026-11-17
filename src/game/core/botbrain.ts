@@ -1,12 +1,15 @@
 import { UNITS, UNIT_IDS } from "../config/units";
 import {
   ATTACK_CLASSES,
+  HERO_XP_CONQUEST,
+  HERO_XP_WIN,
   attackBonusFor,
   attackShares,
   carryCapacity,
   defenseBonusFor,
   defenseRating,
   emptyUnits,
+  heroLevel,
   loyaltyHit,
   ramPostLevels,
   ramsToBreakWall,
@@ -16,6 +19,7 @@ import {
 import {
   MERCHANT_CAPACITY,
   RES,
+  SPEED,
   capacity,
   emptyCost,
   garrison,
@@ -60,7 +64,7 @@ import type { Command, Cost, Units, UnitId, Village } from "./types";
  * landing right behind it, because only one noble works per attack. All fights use your battle rules.
  */
 const HOUR = 3_600_000;
-export const MAX_HOLDINGS = 6; // villages a bot can take with nobles
+export const MAX_HOLDINGS = 1000; // villages a bot can take with nobles
 export const h01 = (s: string) => {
   // deterministic "random" from a string
   let h = 2166136261;
@@ -83,6 +87,53 @@ const pickUnits = (
   return o;
 };
 
+/**
+ * How bold the bots are. Every level still scouts first and only attacks what its report says it can beat; a bolder level
+ * just accepts thinner odds, takes its turns more often, launches more attacks per turn, goes after YOU and conquers more often.
+ * margin = how many times the target's defense the army must bring (1.15 = a 15% edge; luck can swing a fight by ±25%).
+ */
+export interface Aggr {
+  name: string;
+  margin: number;
+  gapH: number;
+  launches: number;
+  player: number;
+  conquer: number;
+}
+export const AGGRESSION: Aggr[] = [
+  {
+    name: "Calm",
+    margin: 1.3,
+    gapH: 14,
+    launches: 1,
+    player: 0.2,
+    conquer: 0.5,
+  },
+  {
+    name: "Normal",
+    margin: 1.15,
+    gapH: 10,
+    launches: 1,
+    player: 0.4,
+    conquer: 0.7,
+  },
+  {
+    name: "Aggressive",
+    margin: 1.05,
+    gapH: 6,
+    launches: 2,
+    player: 0.65,
+    conquer: 0.85,
+  },
+  {
+    name: "Relentless",
+    margin: 1.0,
+    gapH: 4,
+    launches: 3,
+    player: 0.9,
+    conquer: 1.0,
+  },
+];
 export interface Advice {
   targetId: string;
   action: "raid" | "conquer";
@@ -96,6 +147,10 @@ export interface TurnCtx {
   stance: Stance; // what this bot may do to YOU right now (nothing / raid / conquer)
   held: Record<string, number>; // villages each bot has taken with nobles
   commands: Command[]; // everything on the road (to know which merchants are busy)
+  grudge?: number; // how much this bot hates YOU (you hit it): it wants to hit back
+  aggr?: Aggr; // how bold the bots are (default: Normal)
+  heroXp?: number; // this bot's Paladin experience (a bot has one hero, kept as xp: he leads its clearing army)
+  exclude?: Set<string>; // targets it already hit or scouted this turn
   advice?: Advice; // an optional plan from the AI advisor (validated here, never trusted)
 }
 export interface Option {
@@ -122,6 +177,7 @@ export interface TurnResult {
   alerts: { id: string; text: string }[];
   bumps: [string, Partial<Stats>][];
   held: number;
+  hero?: { botId: string; xp: number; fell?: boolean }; // a march with the bot's Paladin was fought: xp gained, or he fell
 }
 const newResult = (): TurnResult => ({
   changed: {},
@@ -136,7 +192,8 @@ const newResult = (): TurnResult => ({
 export function planOptions(
   bot: Clan,
   ctx: TurnCtx,
-): { src: Village; options: Option[] } | null {
+): { src: Village; options: Option[]; hero: number } | null {
+  const A = ctx.aggr ?? AGGRESSION[3];
   const mine = botVillages(bot, ctx.world, ctx.now);
   if (!mine.length) return null; // a bot with no villages is out of the game
   const pool = strikePool(bot);
@@ -145,8 +202,28 @@ export function planOptions(
   const src = mine.reduce((b, v) => (strikePower(v) > strikePower(b) ? v : b));
   const have = emptyUnits();
   for (const u of pool) have[u] = src.units[u];
+  const heroAway = ctx.commands.some(
+    (c) =>
+      c.clan === bot.name && (c.heroLevel ?? 0) > 0 && c.arriveAt > ctx.now,
+  ); // his army is still on the road
+  const hero = heroAway ? 0 : heroLevel(ctx.heroXp ?? 0);
   const power =
-    attackPower(have) * attackBonusFor(src.buildings.smithy, have, 0);
+    attackPower(have) *
+    attackBonusFor(
+      src.buildings.smithy,
+      { ...have, paladin: hero > 0 ? 1 : 0 },
+      hero,
+    );
+  const targeted = new Set(
+    ctx.commands
+      .filter(
+        (c) =>
+          c.clan === bot.name &&
+          c.arriveAt > ctx.now &&
+          ["strike", "raid", "expand"].includes(c.kind),
+      )
+      .map((c) => c.toId),
+  ); // never send a second army at what it is already attacking
   const shares = attackShares(have);
   const canNoble =
     botCanNoble(src) &&
@@ -175,87 +252,98 @@ export function planOptions(
     for (const v of ctx.owned)
       if (d(v) <= 70) cands.push({ t: v, kind: "player" });
 
-  const options = cands.map(({ t, kind }): Option => {
-    const info = getIntel(bot.id, t.id);
-    const known = intelFresh(info, ctx.now); // a fresh report from its scouts (or from its own last fight)
-    const dist = d(t);
-    const jitter =
-      0.85 + 0.3 * h01(`${bot.id}:${Math.floor(ctx.now / HOUR)}:${t.id}`);
-    const feud = 1 + 2 * Math.min(2, feudOf(bot.id, t.owner ?? "", ctx.now)); // it prefers to hit back whoever hit it
-    const base = {
-      id: t.id,
-      label: `${t.name} (${t.owner ?? "barbarians"})`,
-      kind,
-      owner: t.owner,
-      target: t,
-      known,
-      dist: Math.round(dist),
-    };
-    if (!known || power < 150) {
-      // no report: the bot can only guess from what everybody sees on the map (the points)
-      const waiting = (info?.pendingUntil ?? 0) > ctx.now; // its scouts are still on the way
-      const beatable = power * 0.85 >= 2.5 * t.points; // from the points on the map, is it worth a look at all?
-      const stuck =
-        waiting ||
-        !beatable ||
-        ((info?.tries ?? 0) >= 3 &&
-          src.units.scout < (info?.lastSent ?? 0) * 2);
+  // does this bot go for YOU this turn? always when you hurt it (grudge); otherwise now and then, more often in war mode
+  const campaign = Math.floor((ctx.now * SPEED) / (6 * HOUR)); // the same answer for 6 game hours, so a bot that scouts you is still after you when its scouts are back
+  const wantsPlayer =
+    (ctx.grudge ?? 0) > 0.5 ||
+    h01(`${bot.id}:p:${campaign}`) <
+      Math.min(1, ctx.stance === "conquer" ? A.player : A.player * 1.25);
+  const options = cands
+    .filter((c) => !ctx.exclude?.has(c.t.id))
+    .map(({ t, kind }): Option => {
+      const info = getIntel(bot.id, t.id);
+      const known = intelFresh(info, ctx.now); // a fresh report from its scouts (or from its own last fight)
+      const dist = d(t);
+      const jitter =
+        0.85 + 0.3 * h01(`${bot.id}:${Math.floor(ctx.now / HOUR)}:${t.id}`);
+      const feud =
+        (1 + 2 * Math.min(2, feudOf(bot.id, t.owner ?? "", ctx.now))) *
+        (kind === "player" && wantsPlayer ? 100 * (1 + (ctx.grudge ?? 0)) : 1); // it prefers to hit back whoever hit it, and a bot that is allowed to attack YOU sometimes picks you over a barbarian village (you are worth more to it than your few points say)
+      const base = {
+        id: t.id,
+        label: `${t.name} (${t.owner ?? "barbarians"})`,
+        kind,
+        owner: t.owner,
+        target: t,
+        known,
+        dist: Math.round(dist),
+      };
+      if (!known || power < 150) {
+        // no report: the bot can only guess from what everybody sees on the map (the points)
+        const waiting = (info?.pendingUntil ?? 0) > ctx.now; // its scouts are still on the way
+        const beatable = power * 0.85 >= 2.5 * t.points; // from the points on the map, is it worth a look at all?
+        const stuck =
+          waiting ||
+          !beatable ||
+          ((info?.tries ?? 0) >= 3 &&
+            src.units.scout < (info?.lastSent ?? 0) * 2);
+        return {
+          ...base,
+          ratio: 0,
+          viable: false,
+          loot: 0,
+          conquer: false,
+          score:
+            (t.points / (1 + dist / 15)) *
+            jitter *
+            feud *
+            (kind === "barbarian" ? 3 : 1) *
+            (stuck ? 0.05 : 1),
+          send: emptyUnits(),
+          weighted: 0,
+          power,
+        }; // like any player: farm the easy barbarians first, other players when it is safe
+      }
+      const rating = info!.rating as Record<string, number>; // what its LAST report says, not what is there now
+      const weighted = ATTACK_CLASSES.reduce(
+        (s, k) => s + shares[k] * (rating[k] ?? 0),
+        0,
+      );
+      const need = A.margin * weighted;
+      const frac = Math.min(0.85, need / power);
+      const send = pickUnits(src, pool, (n) => Math.ceil(n * frac));
+      if (src.units.ram > 0 && (info!.wall ?? 0) >= 2)
+        send.ram = Math.min(src.units.ram, ramsToBreakWall(info!.wall!));
+      const stock = RES.reduce((s, r) => s + t.resources[r], 0); // loot is guessed from the village's points
+      const loot = Math.min(
+        carryCapacity(send),
+        Math.floor(Math.min(stock, t.points * 40) * 0.5),
+      );
+      const conquer =
+        canNoble &&
+        !targeted.has(t.id) &&
+        power * 0.75 >= 1.3 * (A.margin / 1.15) * weighted &&
+        !(
+          kind === "player" &&
+          (ctx.stance !== "conquer" || ctx.owned.length <= 1)
+        );
       return {
         ...base,
-        ratio: 0,
-        viable: false,
-        loot: 0,
-        conquer: false,
+        ratio: Math.round(((power * 0.85) / Math.max(1, weighted)) * 100) / 100,
+        viable: power * 0.85 >= need && !targeted.has(t.id),
+        loot,
+        conquer,
         score:
-          (t.points / (1 + dist / 15)) *
+          ((loot + (conquer ? 3000 : 0)) / (1 + dist / 15)) *
           jitter *
           feud *
-          (kind === "barbarian" ? 3 : 1) *
-          (stuck ? 0.05 : 1),
-        send: emptyUnits(),
-        weighted: 0,
+          (kind === "bot" ? 1.2 : 1),
+        send,
+        weighted,
         power,
-      }; // like any player: farm the easy barbarians first, other players when it is safe
-    }
-    const rating = info!.rating as Record<string, number>; // what its LAST report says, not what is there now
-    const weighted = ATTACK_CLASSES.reduce(
-      (s, k) => s + shares[k] * (rating[k] ?? 0),
-      0,
-    );
-    const need = 1.15 * weighted;
-    const frac = Math.min(0.85, need / power);
-    const send = pickUnits(src, pool, (n) => Math.ceil(n * frac));
-    if (src.units.ram > 0 && (info!.wall ?? 0) >= 2)
-      send.ram = Math.min(src.units.ram, ramsToBreakWall(info!.wall!));
-    const stock = RES.reduce((s, r) => s + t.resources[r], 0); // loot is guessed from the village's points
-    const loot = Math.min(
-      carryCapacity(send),
-      Math.floor(Math.min(stock, t.points * 40) * 0.5),
-    );
-    const conquer =
-      canNoble &&
-      power * 0.75 >= 1.3 * weighted &&
-      !(
-        kind === "player" &&
-        (ctx.stance !== "conquer" || ctx.owned.length <= 1)
-      );
-    return {
-      ...base,
-      ratio: Math.round(((power * 0.85) / Math.max(1, weighted)) * 100) / 100,
-      viable: power * 0.85 >= need,
-      loot,
-      conquer,
-      score:
-        ((loot + (conquer ? 3000 : 0)) / (1 + dist / 15)) *
-        jitter *
-        feud *
-        (kind === "bot" ? 1.2 : 1),
-      send,
-      weighted,
-      power,
-    };
-  });
-  return { src, options };
+      };
+    });
+  return { src, options, hero };
 }
 
 /** Keep every village of the bot stocked: a rich village with merchants sends to a poor one (real caravans). */
@@ -317,18 +405,42 @@ export function balanceTrade(
   return out;
 }
 
-/** One bot's turn. Pure: returns what changed. */
+/** One bot's turn. Pure: returns what changed. A bolder bot takes several actions (each from its best village that is left). */
 export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
   const out = newResult();
   const trade = balanceTrade(bot, ctx.world, ctx.commands, ctx.now);
   Object.assign(out.changed, trade.changed);
   out.commands.push(...trade.commands);
   out.bumps.push(...trade.bumps);
-  const plan = planOptions(bot, {
-    ...ctx,
-    world: { ...ctx.world, ...out.changed },
-  });
-  if (!plan) return out;
+  const A = ctx.aggr ?? AGGRESSION[1];
+  const done = new Set<string>(ctx.exclude ?? []);
+  for (let k = 0; k < A.launches; k++) {
+    const target = oneAction(
+      bot,
+      {
+        ...ctx,
+        world: { ...ctx.world, ...out.changed },
+        commands: [...ctx.commands, ...out.commands],
+        exclude: done,
+      },
+      out,
+      A,
+    );
+    if (!target) break;
+    done.add(target);
+  }
+  return out;
+}
+
+/** Scout or attack once. Returns the target it acted on, or null when there was nothing worth doing. */
+function oneAction(
+  bot: Clan,
+  ctx: TurnCtx,
+  out: TurnResult,
+  A: Aggr,
+): string | null {
+  const plan = planOptions(bot, ctx);
+  if (!plan) return null;
   const pool = strikePool(bot);
   const s = settle(normalizeVillage(plan.src), ctx.now); // botwar edits this village in place
   const lc: LaunchCtx = {
@@ -338,16 +450,16 @@ export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
     news: [],
     changed: out.changed,
   };
-  const finish = () => {
+  const finish = (id: string) => {
     out.news.push(...lc.news.map((n) => n.text));
-    return out;
+    return id;
   };
   const viable = plan.options.filter((o) => o.known && o.viable);
 
   // ---- no report on anything worth hitting: scout first ----
   if (!viable.length) {
     const unknown = plan.options.filter((o) => !o.known);
-    if (!unknown.length || s.units.scout < 1) return out;
+    if (!unknown.length || s.units.scout < 1) return null;
     const best = unknown.reduce((b, o) => (o.score > b.score ? o : b));
     sendScouts(
       lc,
@@ -359,7 +471,7 @@ export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
         (getIntel(bot.id, best.id)?.lastSent ?? 0) * 2,
       ),
     ); // after a failure it doubles the scouts
-    return finish();
+    return finish(best.id);
   }
 
   const advised = ctx.advice
@@ -371,14 +483,15 @@ export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
     pick.conquer &&
     (advised
       ? ctx.advice!.action === "conquer"
-      : h01(`${bot.id}:c:${Math.floor(ctx.now / HOUR)}`) < 0.7);
+      : h01(`${bot.id}:c:${Math.floor(ctx.now / HOUR)}:${t.id}`) < A.conquer);
   const wallSeen = getIntel(bot.id, t.id)?.wall ?? 0;
   let waves = 0;
   if (conquer)
     waves = nobleTrain(s, `${bot.id}:${t.id}:${Math.floor(ctx.now / HOUR)}`);
   const frac = Math.min(
     conquer ? 0.4 : 0.85,
-    ((conquer ? 1.3 : 1.15) * pick.weighted) / pick.power,
+    ((conquer ? 1.3 * (A.margin / 1.15) : A.margin) * pick.weighted) /
+      pick.power,
   );
   const clear = pickUnits(s, pool, (n) => Math.ceil(n * frac));
   if (s.units.ram > 0 && wallSeen >= 2)
@@ -404,8 +517,11 @@ export function botTurn(bot: Clan, ctx: TurnCtx): TurnResult {
     )
       conquer = false; // not enough men to protect the nobles: a plain raid instead
   }
+  const first = out.commands.length;
   launchWar(lc, bot, s, t, clear, conquer ? waves : 0);
-  return finish();
+  if (plan.hero > 0 && out.commands[first])
+    out.commands[first].heroLevel = plan.hero; // the Paladin leads the clearing army
+  return finish(t.id);
 }
 
 /**
@@ -454,7 +570,11 @@ export function landStrike(
     army,
     defBefore,
     tgt.buildings.wall,
-    attackBonusFor(c.smithy ?? 0, army, 0) * (luckOn ? 1 + luckOf(c.id) : 1),
+    attackBonusFor(
+      c.smithy ?? 0,
+      { ...army, paladin: c.heroLevel ? 1 : 0 },
+      c.heroLevel ?? 0,
+    ) * (luckOn ? 1 + luckOf(c.id) : 1),
     defenseBonusFor(tgt.buildings.smithy),
   );
   tgt.units = survivorsOf(tgt.units, defBefore, res.defenderLeft);
@@ -530,6 +650,14 @@ export function landStrike(
       wall: tgt.buildings.wall,
     }); // it saw the village with its own eyes
   }
+  if (c.heroLevel)
+    out.hero = {
+      botId: bot.id,
+      xp: res.attackerWins
+        ? HERO_XP_WIN + (out.held ? HERO_XP_CONQUEST : 0)
+        : 0,
+      fell: !res.attackerWins,
+    }; // his army won: xp; it lost: the Paladin fell
   out.changed[tgt.id] = tgt;
   out.bumps.push([bot.name, { kills: killed, lost: fell, looted }]);
   const victim = prevOwner ? rivalInfo(prevOwner) : null;

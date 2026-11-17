@@ -10,6 +10,7 @@ import { UNITS, UNIT_IDS } from "../game/config/units";
 import {
   RES,
   buildCost,
+  buildPopNeeded,
   buildReqMet,
   buildTimeMs,
   canAfford,
@@ -18,6 +19,7 @@ import {
   meetsReq,
   prodPerHour,
   recruitTimeMs,
+  recallWindowMs,
   settle,
   garrison,
   paladinCount,
@@ -28,14 +30,13 @@ import {
   popUsed,
   hidingProtect,
   worldAgeHours,
-  recallWindowMs,
 } from "../game/core/economy";
-import { PLAYER, nemesisClan, rivalInfo } from "../game/core/world";
+import { PLAYER, rivalInfo } from "../game/core/world";
 import { protectionLeftHours, type RivalMode } from "../game/core/rivals";
+import { AGGRESSION } from "../game/core/botbrain";
 import type {
   BuildingId,
   Cost,
-  Units,
   UnitId,
   UnitRole,
   Report,
@@ -50,15 +51,10 @@ import {
   HERO_XP_LEVELS,
   wallFlat,
   wallMult,
-  attackBonusFor,
-  attackShares,
-  carryCapacity,
   defenseBonusFor,
   defenseRating,
   heroLevel,
   pips,
-  ramsToBreakWall,
-  resolveBattle,
   tier,
 } from "../game/core/combat";
 import { useGame } from "../game/store";
@@ -71,9 +67,11 @@ import QuickSend from "./QuickSend";
 import { kindIcon } from "./icons";
 import ReportView from "./ReportView";
 import WarTable from "./WarTable";
+import RallyPanel from "./RallyPanel";
 
 type Req = { building: BuildingId; level: number };
 type TipState = { x: number; y: number; node: ReactNode } | null;
+type Toast = { text: string; report: Report | null } | null;
 const PRODUCES: Partial<Record<BuildingId, "wood" | "clay" | "iron">> = {
   timber: "wood",
   clay: "clay",
@@ -153,6 +151,31 @@ function Tabs<T extends string>({
   );
 }
 
+/** A set of ids kept in localStorage, so "opened" survives a reload. The first time, `initial` counts as already seen. */
+function useSeenIds(key: string, initial: string[]) {
+  const [seen, setSeen] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return new Set<string>(raw ? JSON.parse(raw) : initial);
+    } catch {
+      return new Set<string>(initial);
+    }
+  });
+  const add = (ids: string[]) =>
+    setSeen((prev) => {
+      if (ids.every((i) => prev.has(i))) return prev;
+      const next = [...prev, ...ids].slice(-400);
+      try {
+        localStorage.setItem(key, JSON.stringify(next));
+      } catch {
+        /* storage blocked */
+      }
+      return new Set(next);
+    });
+  return [seen, add] as const;
+}
+const NEWS_SEEN_KEY = "tribal-news-seen-at";
+
 export default function Hud() {
   const {
     mode,
@@ -167,32 +190,37 @@ export default function Hud() {
     target,
     commands,
     reports,
+    news,
+    rallies,
+    recall,
+    cancelBuild,
+    cancelRecruit,
     selectedBuilding,
     selectBuilding,
     hero,
     focusOn,
     rivalMode,
     setRivalMode,
+    aiEnabled,
+    setAi,
+    aiStatus,
+    botAggression,
+    setBotAggression,
     selectTarget,
     renameVillage,
-    cancelBuild,
-    cancelRecruit,
-    recall,
     gameSpeed,
     setGameSpeed,
     cursor,
     picked,
     rivals,
-    aiEnabled,
-    setAi,
-    aiStatus,
   } = useGame();
   useGame((s) => s.now); // re-render on tick
   const [left, setLeft] = useState<"buildings" | "army">("buildings");
-  const [right, setRight] = useState<"target" | "reports">("target");
+  const [right, setRight] = useState<"target" | "reports" | "news">("target");
   const [helpOpen, setHelpOpen] = useState(false);
   const [simSeed, setSimSeed] = useState<SimSeed | null>(null); // a report's armies, opened in the simulator
   const [warOpen, setWarOpen] = useState(false);
+  const [rallyOpen, setRallyOpen] = useState(false);
   const [rankOpen, setRankOpen] = useState(false);
   const [newGameOpen, setNewGameOpen] = useState(false);
   const [gx, setGx] = useState("");
@@ -203,39 +231,66 @@ export default function Hud() {
   const [openReport, setOpenReport] = useState<Report | null>(null);
   const [amt, setAmt] = useState<Partial<Record<UnitId, number>>>({});
   const [tip, setTip] = useState<TipState>(null);
-  const [seenId, setSeenId] = useState<string | null>(reports[0]?.id ?? null);
-  const [toast, setToast] = useState<string | null>(null);
-  const lastToast = useRef(reports[0]?.id);
+  const [toast, setToast] = useState<Toast>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+  const lastReportToast = useRef(reports[0]?.id);
 
-  useEffect(() => {
-    if (right === "reports") setSeenId(reports[0]?.id ?? null);
-  }, [right, reports]);
+  // Reports: "unopened" until you click them (kept in localStorage, so it survives a reload).
+  const [seenReports, markSeen] = useSeenIds(
+    "tribal-seen-reports",
+    reports.map((r) => r.id),
+  );
+  const unreadReports = reports.filter((r) => !seenReports.has(r.id)).length;
+  // World news: the store keeps no ids for it, so "unread" means newer than the last time you looked at the News tab.
+  const [newsSeenAt, setNewsSeenAt] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(NEWS_SEEN_KEY);
+      return raw ? Number(raw) : Date.now();
+    } catch {
+      return Date.now();
+    }
+  });
+  const unreadNews = news.filter((n) => n.at > newsSeenAt).length;
+
+  const flash = (t: NonNullable<Toast>) => {
+    setToast(t);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 5000);
+  };
+  // a new report (battles, scouting, attack warnings, deliveries) pops up as a toast
   useEffect(() => {
     const r = reports[0];
-    if (!r || r.id === lastToast.current) return;
-    lastToast.current = r.id;
-    setToast(r.text);
-    const t = setTimeout(() => setToast(null), 5000);
-    return () => clearTimeout(t);
+    if (!r || r.id === lastReportToast.current) return;
+    lastReportToast.current = r.id;
+    flash({ text: r.text, report: r });
   }, [reports]);
+  // looking at the News tab counts as having seen the news
+  useEffect(() => {
+    if (right !== "news" || !news.length) return;
+    const latest = news[0].at;
+    if (latest <= newsSeenAt) return;
+    setNewsSeenAt(latest);
+    try {
+      localStorage.setItem(NEWS_SEEN_KEY, String(latest));
+    } catch {
+      /* storage blocked */
+    }
+  }, [right, news, newsSeenAt]);
 
   const v = settle(villages[activeId], Date.now());
   const cap = capacity(v);
   const pcap = popCap(v);
   const pb = popBreakdown(v, commands, villages);
   const mineCmds = commands.filter((c) => c.kind !== "raid" && !c.clan);
-  const protLeft = protectionLeftHours(
-    worldAgeHours(),
-    Object.values(villages)
-      .filter((x) => x.owner === PLAYER)
-      .reduce((n, x) => n + x.points, 0),
-  );
   const used = popUsed(v, commands, villages);
   const free = popFree(v, commands, villages);
   const mine = Object.values(villages).filter((x) => x.owner === PLAYER);
   const t = target ? (villages[target.id] ?? target) : null;
-  const idx = reports.findIndex((r) => r.id === seenId);
-  const unread = seenId == null || idx < 0 ? reports.length : idx;
+  // beginner protection: bots can't attack you (and you can't attack them) at first
+  const protLeft = protectionLeftHours(
+    worldAgeHours(),
+    mine.reduce((n, x) => n + x.points, 0),
+  );
 
   // ---- strategy helpers: own weak spot, attack mix, and a prediction from the last scout report ----
   const paladinExists = paladinCount(villages, commands) > 0;
@@ -283,6 +338,9 @@ export default function Hud() {
             </div>
             <CostLine cost={c} have={v.resources} />
             <div>⏱ {fmt(buildTimeMs(id, lvl, v.buildings.main))}</div>
+            <div className={buildPopNeeded(v, id) > free ? "red" : ""}>
+              👥 +{buildPopNeeded(v, id)} farm slots
+            </div>
             {id === "farm" && (
               <div>
                 👥 cap {popCapAt(lvl - 1)} → {popCapAt(lvl)}
@@ -330,7 +388,9 @@ export default function Hud() {
         </div>
         {u === "noble" && (
           <small style={{ opacity: 0.8 }}>
-            Each survivor of a won attack lowers loyalty by 25.
+            Only ONE noble works per attack: a won attack that carries nobles
+            lowers loyalty by 20–35, and the others come home. Send one noble
+            per wave (the War Table's noble train does it).
           </small>
         )}
       </>
@@ -379,11 +439,28 @@ export default function Hud() {
         <span>/ {cap}</span>
         <span
           className={used >= pcap * 0.95 ? "red" : ""}
-          title="Population: units at home, in training and away"
+          title="Population: buildings, and units at home, in training and away"
         >
           👥 {used}/{pcap}
         </span>
+        {paladinExists && (
+          <span
+            title={`Paladin level ${hl}: +${Math.round(hl * HERO_ATTACK_PER_LEVEL * 100)}% attack to the armies he leads`}
+          >
+            🦸 Lv {hl}
+            <small>
+              {" "}
+              {hero.xp}
+              {HERO_XP_LEVELS[hl] ? `/${HERO_XP_LEVELS[hl]}` : " (max)"} xp
+            </small>
+          </span>
+        )}
         {v.loyalty < 100 && <span>👑 loyalty {Math.floor(v.loyalty)}</span>}
+        {protLeft > 0 && (
+          <span title="Beginner protection: bots can't attack you and you can't attack them (barbarians are fine). It ends after 24 game hours or at 800 points.">
+            🛡 Protected {Math.ceil(protLeft)}h
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <select
           title="Game speed: real time is 1×"
@@ -406,17 +483,23 @@ export default function Hud() {
           <option value="raids">⚔ Raids</option>
           <option value="war">👑 War (like players)</option>
         </select>
+        <select
+          title="How bold the bots are. Every level still scouts first and only attacks what it can beat; bolder bots accept thinner odds, act more often, launch more attacks at once and go after you more."
+          value={botAggression}
+          onChange={(e) => setBotAggression(Number(e.target.value))}
+        >
+          {AGGRESSION.map((a, i) => (
+            <option key={a.name} value={i}>
+              {["🧊", "⚖", "🔥", "☠"][i]} {a.name}
+            </option>
+          ))}
+        </select>
         <button
           title={`AI advisor for the bots (Groq): ${aiStatus}. Needs GROQ_API_KEY in .env.local; the bots work without it.`}
           onClick={() => setAi(!aiEnabled)}
         >
           🧠 {aiEnabled ? "AI on" : "AI off"}
         </button>
-        {protLeft > 0 && (
-          <span title="Beginner protection: bots can't attack you and you can't attack them (barbarians are fine). It ends after 24 game hours or at 800 points.">
-            🛡 Protected {Math.ceil(protLeft)}h
-          </span>
-        )}
         {view === "world" && cursor && (
           <span title="Tile under the mouse">
             🧭 {cursor.x}|{cursor.y}
@@ -460,14 +543,6 @@ export default function Hud() {
             )}
           </span>
         )}
-        {(paladinExists || hero.xp > 0) && (
-          <span
-            title={`Your Paladin: level ${hl}, +${Math.round(hl * HERO_ATTACK_PER_LEVEL * 100)}% attack to armies he leads. XP ${hero.xp}${HERO_XP_LEVELS[hl] ? ` of ${HERO_XP_LEVELS[hl]} for the next level` : " (max level)"}`}
-          >
-            🦸 Paladin Lv {hl}
-            {HERO_XP_LEVELS[hl] ? ` · ${hero.xp}/${HERO_XP_LEVELS[hl]} xp` : ""}
-          </span>
-        )}
         <button onClick={() => setRankOpen(true)}>🏆 Ranking</button>
         <button
           onClick={() => {
@@ -484,6 +559,12 @@ export default function Hud() {
           }}
         >
           ⚔ War Table
+        </button>
+        <button
+          title="Gather troops from several villages into one big army"
+          onClick={() => setRallyOpen(true)}
+        >
+          📯 Rally{rallies.length ? ` (${rallies.length})` : ""}
         </button>
         <button onClick={() => setHelpOpen(true)}>? Help</button>
         <button
@@ -506,12 +587,19 @@ export default function Hud() {
         <div
           className="toast"
           onClick={() => {
-            setOpenReport(reports[0] ?? null);
+            if (toast.report) {
+              markSeen([toast.report.id]);
+              setOpenReport(toast.report);
+            }
             setToast(null);
           }}
-          title="Click for the full report"
+          title={
+            toast.report
+              ? "Click for the full report"
+              : "Click to open the news"
+          }
         >
-          📜 {toast}
+          {toast.report ? "📜" : "🔔"} {toast.text}
         </div>
       )}
 
@@ -562,8 +650,15 @@ export default function Hud() {
                     <button disabled>🔒</button>
                   ) : (
                     <button
+                      title={
+                        buildPopNeeded(v, id) > free
+                          ? `Needs ${buildPopNeeded(v, id)} free farm slots (you have ${Math.max(0, free)}). Upgrade the Farm, or free some troops.`
+                          : undefined
+                      }
                       disabled={
-                        !canAfford(v.resources, c) || v.buildQueue.length >= 3
+                        !canAfford(v.resources, c) ||
+                        v.buildQueue.length >= 3 ||
+                        buildPopNeeded(v, id) > free
                       }
                       onClick={() => build(id)}
                     >
@@ -581,18 +676,17 @@ export default function Hud() {
             )}
             {v.buildQueue.map((j, i) => (
               <div key={i}>
-                <div className="row">
-                  <span>
-                    {BUILDINGS[j.building].name} → {j.level}{" "}
-                    <small>({fmt(j.finishesAt - Date.now())})</small>
-                  </span>
+                {BUILDINGS[j.building].name} → {j.level}{" "}
+                <small>({fmt(j.finishesAt - Date.now())})</small>
+                {i === v.buildQueue.length - 1 && (
                   <button
-                    title="Cancel this construction (90% of the cost comes back; later upgrades of it are cancelled too)"
+                    title="Cancel this construction and get the resources back"
+                    style={{ marginLeft: 6 }}
                     onClick={() => cancelBuild(i)}
                   >
                     ✕
                   </button>
-                </div>
+                )}
                 <div className="bar">
                   <i
                     style={{
@@ -611,8 +705,10 @@ export default function Hud() {
               <small>
                 Population {used}/{pcap} — upgrade the Farm to raise it.
                 <br />
-                At home {pb.home} · training {pb.training} · marching{" "}
-                {pb.marching} · stationed in other villages {pb.stationedOut}
+                Buildings {pb.buildings} · at home {pb.home} · training{" "}
+                {pb.training} · marching {pb.marching} · stationed in other
+                villages {pb.stationedOut}
+                {pb.reserve > 0 && <> · held for a rally {pb.reserve}</>}
                 {pb.hostedHere > 0 && (
                   <>
                     {" "}
@@ -715,18 +811,17 @@ export default function Hud() {
             )}
             {v.recruitQueue.map((j, i) => (
               <div key={i}>
-                <div className="row">
-                  <span>
-                    {j.count}× {UNITS[j.unit].name}{" "}
-                    <small>({fmt(j.finishesAt - Date.now())})</small>
-                  </span>
+                {j.count}× {UNITS[j.unit].name}{" "}
+                <small>({fmt(j.finishesAt - Date.now())})</small>
+                {i === v.recruitQueue.length - 1 && (
                   <button
-                    title="Cancel this training order (90% of the cost comes back)"
+                    title="Cancel this training and get the resources back"
+                    style={{ marginLeft: 6 }}
                     onClick={() => cancelRecruit(i)}
                   >
                     ✕
                   </button>
-                </div>
+                )}
                 <div className="bar">
                   <i
                     style={{
@@ -744,7 +839,11 @@ export default function Hud() {
         <Tabs
           tabs={[
             ["target", "Target"],
-            ["reports", unread ? `Reports (${unread})` : "Reports"],
+            [
+              "reports",
+              unreadReports ? `Reports (${unreadReports})` : "Reports",
+            ],
+            ["news", unreadNews ? `News (${unreadNews})` : "News"],
           ]}
           value={right}
           onChange={setRight}
@@ -817,40 +916,43 @@ export default function Hud() {
             )}
             <hr />
             <b>Marching ({mineCmds.length})</b>
-            {mineCmds.map((c) => (
-              <div key={c.id}>
-                <div className="row">
-                  <span>
-                    {kindIcon(c.kind)} {c.toId}
-                    <small>
-                      {" "}
-                      ·{" "}
-                      {Date.now() < c.departAt
-                        ? `leaves in ${fmt(c.departAt - Date.now())}`
-                        : fmt(c.arriveAt - Date.now())}
-                    </small>
-                  </span>
-                  {c.kind !== "return" &&
-                    c.kind !== "trade" &&
-                    Date.now() < c.arriveAt &&
-                    Date.now() - c.departAt <= recallWindowMs() && (
-                      <button
-                        title="Cancel: the troops turn around where they are (possible during the first 10 game minutes)"
-                        onClick={() => recall(c.id)}
-                      >
-                        ↩ Cancel
-                      </button>
-                    )}
+            {mineCmds.map((c) => {
+              const nowMs = Date.now();
+              // the same rules the store's recall() enforces
+              const canRecall =
+                c.kind !== "return" &&
+                c.kind !== "trade" &&
+                c.kind !== "rally" &&
+                !c.rally &&
+                nowMs < c.arriveAt &&
+                nowMs - c.departAt <= recallWindowMs();
+              return (
+                <div key={c.id}>
+                  {kindIcon(c.kind)} {c.toId}
+                  <small> · {fmt(c.arriveAt - nowMs)}</small>
+                  {canRecall && (
+                    <button
+                      title={
+                        nowMs < c.departAt
+                          ? "Cancel: the troops stay home"
+                          : "Call the troops back"
+                      }
+                      style={{ marginLeft: 6 }}
+                      onClick={() => recall(c.id)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                  <div className="bar">
+                    <i
+                      style={{
+                        width: `${pct(c.arriveAt, c.arriveAt - c.departAt)}%`,
+                      }}
+                    />
+                  </div>
                 </div>
-                <div className="bar">
-                  <i
-                    style={{
-                      width: `${pct(c.arriveAt, c.arriveAt - c.departAt)}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </>
         )}
 
@@ -858,6 +960,7 @@ export default function Hud() {
           (reports.length ? (
             reports.map((r) => {
               const d = r.detail;
+              const unopened = !seenReports.has(r.id);
               const tone =
                 d?.kind === "battle"
                   ? (
@@ -875,11 +978,22 @@ export default function Hud() {
               return (
                 <div
                   key={r.id}
-                  className={"report " + tone}
-                  onClick={() => setOpenReport(r)}
+                  className={"report " + tone + (unopened ? " unread" : "")}
+                  style={
+                    unopened
+                      ? { fontWeight: 600, borderLeft: "3px solid #4da3ff" }
+                      : undefined
+                  }
+                  onClick={() => {
+                    markSeen([r.id]);
+                    setOpenReport(r);
+                  }}
                   title="Click for the full report"
                 >
-                  <div style={{ wordBreak: "break-word" }}>{r.text}</div>
+                  <div style={{ wordBreak: "break-word" }}>
+                    {unopened ? "● " : ""}
+                    {r.text}
+                  </div>
                   <small>
                     {fmt(Date.now() - r.at)} ago{d ? " · 🔎 details" : ""}
                   </small>
@@ -888,6 +1002,21 @@ export default function Hud() {
             })
           ) : (
             <div>No reports yet.</div>
+          ))}
+
+        {right === "news" &&
+          (news.length ? (
+            news.map((n, i) => (
+              <div key={`${n.at}-${i}`} className="report">
+                <div style={{ wordBreak: "break-word" }}>{n.text}</div>
+                <small>{fmt(Date.now() - n.at)} ago</small>
+              </div>
+            ))
+          ) : (
+            <div>
+              Quiet so far. Bots fight each other and conquer villages as the
+              world grows.
+            </div>
           ))}
       </div>
 
@@ -937,6 +1066,10 @@ export default function Hud() {
             <b>Requirements</b>
           </div>
           <Reqs reqs={BUILDINGS[sb].requires} v={v} />
+          <div className={buildPopNeeded(v, sb) > free ? "red" : ""}>
+            👥 Farm slots for the next level: +{buildPopNeeded(v, sb)} (free:{" "}
+            {Math.max(0, free)})
+          </div>
           {nextLevel(sb) <= BUILDINGS[sb].maxLevel ? (
             <>
               <div style={{ marginTop: 6 }}>
@@ -953,7 +1086,8 @@ export default function Hud() {
                 disabled={
                   !buildReqMet(v, sb) ||
                   !canAfford(v.resources, buildCost(sb, nextLevel(sb))) ||
-                  v.buildQueue.length >= 3
+                  v.buildQueue.length >= 3 ||
+                  buildPopNeeded(v, sb) > free
                 }
               >
                 {buildReqMet(v, sb)
@@ -984,7 +1118,7 @@ export default function Hud() {
             focusOn(x, y);
             setOpenReport(null);
           }}
-          onSimulate={(seed) => {
+          onLoadSim={(seed) => {
             setSimSeed(seed);
             setOpenReport(null);
             setHelpOpen(true);
@@ -1005,6 +1139,7 @@ export default function Hud() {
         <Market to={marketTo} onClose={() => setMarketOpen(false)} />
       )}
       {warOpen && <WarTable seed={warSeed} onClose={() => setWarOpen(false)} />}
+      {rallyOpen && <RallyPanel onClose={() => setRallyOpen(false)} />}
       {helpOpen && (
         <Help
           seed={simSeed}

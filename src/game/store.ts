@@ -63,13 +63,22 @@ import { RALLY } from "./config/rally";
 import {
   collectRally,
   joinProblem,
-  rallyTimerMs,
   splitLoot,
   splitSurvivors,
   sumUnits,
   troopCount,
   type Rally,
+  type RallyTimerKey,
 } from "./core/rally";
+
+/** How long a rally waits before its combined army leaves, by the timer the panel offers (real time, not game time). */
+const RALLY_TIMER_MS: Record<string, number> = {
+  "30s": 30_000,
+  "1m": 60_000,
+  "2m": 120_000,
+  "5m": 300_000,
+  "10m": 600_000,
+};
 import { landStrike, type Advice } from "./core/botbrain";
 import { defendPass, recordScout } from "./core/botwar";
 import { luckNote, luckOf } from "./core/luck";
@@ -218,6 +227,8 @@ interface GameState {
   }) => void;
   luck: boolean; // luck on: every attack counts for 75%..125% of its strength
   setLuck: (on: boolean) => void;
+  botAggression: number; // 0 Calm · 1 Normal · 2 Aggressive · 3 Relentless: how bold the bots are (they still scout and only attack what they can beat)
+  setBotAggression: (n: number) => void;
   gameSpeed: number; // 1 = real time; 60 = one real minute is one game hour
   setGameSpeed: (n: number) => void;
   startedAt: number; // when this game began (rivals leave you alone at first)
@@ -251,7 +262,8 @@ interface GameState {
   startRally: (o: {
     hostId: string;
     targetId: string;
-    timerMin: number; // game minutes until the army leaves
+    timerKey: RallyTimerKey; // how long until the army leaves: "30s", "1m", "2m", "5m", "10m"
+    targetXY?: [number, number]; // where the target stands (for a village that is not in the saved game yet)
     maxParticipants: number;
     maxTroops: number;
     units: Units; // what the host itself sends
@@ -332,6 +344,11 @@ export const useGame = create<GameState>()(
       gameSpeed: 60,
       luck: true,
       setLuck: (luck) => set({ luck }),
+      botAggression: 3,
+      setBotAggression: (botAggression) =>
+        set({
+          botAggression: Math.max(0, Math.min(3, Math.round(botAggression))),
+        }),
       news: [],
       aiEnabled: false,
       aiAdvice: {},
@@ -360,7 +377,12 @@ export const useGame = create<GameState>()(
         }
         setSpeed(speed);
         setWorldClock(0, fresh.now); // the world starts at age 0 again, so the bots start as newcomers
-        set({ ...fresh, mode: s.mode, presets: s.presets }); // the new game is saved from this moment on
+        set({
+          ...fresh,
+          mode: s.mode,
+          presets: s.presets,
+          botAggression: s.botAggression,
+        }); // the new game is saved from this moment on
       },
       setGameSpeed: (n) => {
         const s = get();
@@ -430,8 +452,8 @@ export const useGame = create<GameState>()(
           s.villages[s.activeId],
           b,
           Date.now(),
-          // s.commands,
-          // s.villages,
+          s.commands,
+          s.villages,
         );
         if (nv) set({ villages: { ...s.villages, [s.activeId]: nv } });
       },
@@ -583,7 +605,8 @@ export const useGame = create<GameState>()(
         const host0 = s.villages[o.hostId];
         const t =
           s.villages[o.targetId] ??
-          (s.target?.id === o.targetId ? s.target : null);
+          (s.target?.id === o.targetId ? s.target : null) ??
+          (o.targetXY ? villageAt(o.targetXY[0], o.targetXY[1], now) : null);
         if (!host0 || host0.owner !== PLAYER)
           return "Pick one of your villages to host the rally.";
         if (!t || t.owner === PLAYER)
@@ -599,8 +622,8 @@ export const useGame = create<GameState>()(
           if (left > 0)
             return `Beginner protection: you can't attack other players for another ${Math.ceil(left)} game hours (or until you reach ${PROTECT_POINTS} points).`;
         }
-        if (!RALLY.timersMin.includes(o.timerMin))
-          return "Pick one of the timers.";
+        const timerMs = RALLY_TIMER_MS[o.timerKey];
+        if (!timerMs) return "Pick one of the timers.";
         const host = settle(normalizeVillage(host0), now);
         if (host.buildings.rally < 1)
           return "Build a Rally Point to send troops.";
@@ -629,7 +652,7 @@ export const useGame = create<GameState>()(
           targetId: t.id,
           targetXY: [t.x, t.y],
           createdAt: now,
-          startsAt: now + rallyTimerMs(o.timerMin),
+          startsAt: now + timerMs,
           maxParticipants,
           maxTroops,
           joins: [{ villageId: host.id, units: { ...units } }],
@@ -934,6 +957,7 @@ export const useGame = create<GameState>()(
             protectionLeftHours(worldAgeHours(now), myPoints) > 0,
           advice: s.aiAdvice,
           commands: s.commands,
+          aggression: s.botAggression,
         });
         let newsAll = rv.news.length
           ? [...rv.news.map((text) => ({ at: now, text })), ...s.news].slice(
@@ -1041,6 +1065,37 @@ export const useGame = create<GameState>()(
             villages[h.id] = { ...h, stationed: rest };
           }
         };
+        // a bot's Paladin leads its clearing army: a won fight gives him experience, a lost one kills him
+        const botHero = (
+          clanName: string | undefined,
+          won: boolean,
+          conquered = false,
+        ) => {
+          const bot = CLANS.find((k) => k.name === clanName);
+          if (!bot) return;
+          const st = rivalsNext[bot.id] ?? {
+            grudge: 0,
+            nextRaidAt: now + raidIntervalMs(),
+            raids: 0,
+            updatedAt: now,
+          };
+          const xp = won
+            ? (st.heroXp ?? 0) +
+              HERO_XP_WIN +
+              (conquered ? HERO_XP_CONQUEST : 0)
+            : 0;
+          rivalsNext[bot.id] = { ...st, heroXp: xp };
+          if (heroLevel(xp) > heroLevel(st.heroXp ?? 0))
+            worldNews.push({
+              at: now,
+              text: `🦸 ${bot.name}'s Paladin reached level ${heroLevel(xp)}`,
+            });
+          else if (!won && (st.heroXp ?? 0) >= 100)
+            worldNews.push({
+              at: now,
+              text: `💀 ${bot.name}'s Paladin fell in battle`,
+            });
+        };
         const provoke = (clan: Clan, amount: number) => {
           // hit a clan and it remembers
           const st = rivalsNext[clan.id] ?? {
@@ -1053,6 +1108,11 @@ export const useGame = create<GameState>()(
             ...st,
             grudge: Math.min(6, st.grudge + amount),
             nextRaidAt: Math.min(st.nextRaidAt, now + retaliateDelayMs()),
+            nextActAt: Math.min(
+              st.nextActAt ?? Infinity,
+              now + retaliateDelayMs(),
+            ), // it takes its next turn soon, first in line
+            followUp: true,
           };
         };
 
@@ -1204,7 +1264,12 @@ export const useGame = create<GameState>()(
             const loyaltyBefore = tgt.loyalty;
             const luck = s.luck ? luckOf(c.id) : 0; // the attacker's luck, -25%..+25% (0 when luck is switched off)
             const bonus =
-              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luck);
+              attackBonusFor(
+                c.smithy ?? 0,
+                { ...c.units, paladin: c.heroLevel ? 1 : 0 },
+                c.heroLevel ?? 0,
+              ) *
+              (1 + luck);
             const defBonus = defenseBonusFor(tgt.buildings.smithy);
             const pw = battlePowers(
               c.units,
@@ -1245,6 +1310,7 @@ export const useGame = create<GameState>()(
               fell = count(c.units) - count(res.attackerLeft);
             bump(bot.name, { kills: killed, lost: fell });
             bump(PLAYER, { kills: fell, lost: killed });
+            if (c.heroLevel) botHero(c.clan, res.attackerWins, conquered);
             const detail: BattleDetail = {
               kind: "battle",
               luck: s.luck ? luck : undefined,
@@ -1349,7 +1415,12 @@ export const useGame = create<GameState>()(
             const wallBefore = tgt.buildings.wall;
             const luck = s.luck ? luckOf(c.id) : 0; // the attacker's luck, -25%..+25% (0 when luck is switched off)
             const bonus =
-              attackBonusFor(c.smithy ?? 0, c.units, 0) * (1 + luck);
+              attackBonusFor(
+                c.smithy ?? 0,
+                { ...c.units, paladin: c.heroLevel ? 1 : 0 },
+                c.heroLevel ?? 0,
+              ) *
+              (1 + luck);
             const defBonus = defenseBonusFor(tgt.buildings.smithy); // YOUR village's smithy, for everyone standing in it
             const pw = battlePowers(
               c.units,
@@ -1431,6 +1502,7 @@ export const useGame = create<GameState>()(
                 fell = count(c.units) - count(res.attackerLeft);
               bump(c.clan ?? null, { kills: killed, lost: fell, looted: took });
               bump(PLAYER, { kills: fell, lost: killed });
+              if (c.heroLevel) botHero(c.clan, res.attackerWins);
             }
             if (res.attackerWins)
               commands.push({
@@ -1539,6 +1611,26 @@ export const useGame = create<GameState>()(
             for (const x of r.commands) commands.push(x);
             for (const t of r.news) worldNews.push({ at: now, text: t });
             for (const [k, d] of r.bumps) bump(k, d);
+            if (r.hero) {
+              const st = rivalsNext[bot.id] ?? {
+                grudge: 0,
+                nextRaidAt: now + raidIntervalMs(),
+                raids: 0,
+                updatedAt: now,
+              };
+              const xp = r.hero.fell ? 0 : (st.heroXp ?? 0) + r.hero.xp;
+              rivalsNext[bot.id] = { ...st, heroXp: xp };
+              if (heroLevel(xp) > heroLevel(st.heroXp ?? 0))
+                worldNews.push({
+                  at: now,
+                  text: `🦸 ${bot.name}'s Paladin reached level ${heroLevel(xp)}`,
+                });
+              else if (r.hero.fell && (st.heroXp ?? 0) >= 100)
+                worldNews.push({
+                  at: now,
+                  text: `💀 ${bot.name}'s Paladin fell in battle`,
+                });
+            }
             if (r.held) {
               const st = rivalsNext[bot.id] ?? {
                 grudge: 0,
@@ -1942,6 +2034,7 @@ export const useGame = create<GameState>()(
         startedAt: s.startedAt,
         gameSpeed: s.gameSpeed,
         luck: s.luck,
+        botAggression: s.botAggression,
         stats: s.stats,
         worldClock: s.worldClock,
         news: s.news,

@@ -7,6 +7,25 @@ import { emptyUnits } from "./combat";
 import { SPEED } from "./economy";
 import type { BuildingId, Cost, Units, Village } from "./types";
 
+/** Real-time durations (ignores game SPEED). */
+export const RALLY_TIMERS_MS = {
+  "30s": 30_000,
+  "1m": 60_000,
+  "2m": 120_000,
+  "5m": 300_000,
+  "10m": 600_000,
+} as const;
+
+export type RallyTimerKey = keyof typeof RALLY_TIMERS_MS;
+
+export const rallyTimerMs = (key: RallyTimerKey | number) => {
+  if (typeof key === "string" && key in RALLY_TIMERS_MS) {
+    return RALLY_TIMERS_MS[key as RallyTimerKey];
+  }
+
+  return Math.max(30_000, Number(key) || 30_000);
+};
+
 export interface RallyJoin {
   villageId: string;
   units: Units;
@@ -25,8 +44,6 @@ export interface Rally {
   catTarget?: BuildingId;
 }
 
-/** A timer picked in game minutes, as real milliseconds at the current game speed. */
-export const rallyTimerMs = (minutes: number) => (minutes * 60_000) / SPEED;
 export const troopCount = (u: Units) =>
   UNIT_IDS.reduce((n, k) => n + (u[k] ?? 0), 0);
 export const sumUnits = (list: Units[]): Units => {

@@ -9,7 +9,7 @@ import type { Clan } from "../game/core/world";
 export const ADVISOR_URL = "/api/groq/chat/completions";
 export const ADVISOR_MODEL: string =
   (import.meta as unknown as { env?: Record<string, string> }).env
-    ?.VITE_GROQ_MODEL ?? "openai/gpt-oss-20b";
+    ?.VITE_GROQ_MODEL ?? "llama-3.3-70b-versatile";
 
 export function buildMessages(bot: Clan, options: Option[]) {
   return [
@@ -80,7 +80,8 @@ export async function askAdvisor(
       body: JSON.stringify({
         model: ADVISOR_MODEL,
         temperature: 0.7,
-        max_tokens: 400,
+        max_tokens: 160,
+        response_format: { type: "json_object" },
         messages: buildMessages(bot, options),
       }),
     });
