@@ -52,7 +52,7 @@ const ESCORT_SLICE = 1; // each noble wave brings this share of the clearing arm
 const SCOUTS_PER_MISSION = 2;
 const SUPPORT_RANGE = 40; // fields: reinforcements come from villages this close
 const DEFEND_VS_PLAYER = true; // bots also reinforce villages YOU are attacking
-const intelTtlMs = () => (6 * HOUR) / SPEED; // how long a scouting report stays good
+const intelTtlMs = () => (12 * HOUR) / SPEED; // how long a scouting report stays good (12 game hours: with 100 bots, 6 meant a constant stream of scouts)
 const defendEveryMs = () => (15 * 60_000) / SPEED; // how often bots look at incoming attacks (15 game min)
 const feudHalfLifeMs = () => (6 * HOUR) / SPEED;
 const HOSTILE: readonly string[] = ["raid", "strike", "attack"]; // marches that can hit a bot village
@@ -107,14 +107,14 @@ export const intelFresh = (
   !!i?.rating && now - i.at < intelTtlMs();
 function remember(botId: string, villageId: string, i: BotIntel) {
   INTEL.set(ikey(botId, villageId), i);
-  if (INTEL.size > 600) {
-    // forget the oldest 200
+  if (INTEL.size > 30000) {
+    // forget the oldest 8000 (it was 600, which with 100 bots and a few dozen villages each threw reports away before they were used, so the bots scouted the same villages again and again)
     [...INTEL.entries()]
       .sort(
         (a, b) =>
           (a[1].pendingUntil ?? a[1].at) - (b[1].pendingUntil ?? b[1].at),
       )
-      .slice(0, 200)
+      .slice(0, 8000)
       .forEach(([k]) => INTEL.delete(k));
   }
 }

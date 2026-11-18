@@ -166,6 +166,7 @@ export interface Option {
   loot: number;
   conquer: boolean;
   score: number;
+  stuck?: boolean; // no report and not worth one: too big for the bot, or its scouts keep failing there
   send: Units;
   weighted: number;
   power: number;
@@ -248,9 +249,14 @@ export function planOptions(
     for (const v of botVillages(b, ctx.world, ctx.now))
       if (d(v) <= 55) cands.push({ t: v, kind: "bot" });
   }
-  if (ctx.stance !== "no")
-    for (const v of ctx.owned)
-      if (d(v) <= 70) cands.push({ t: v, kind: "player" });
+  if (ctx.stance !== "no") {
+    // like a player with a long list of neighbours: look at the few weakest-looking villages in reach, not at all of them (with 100+ villages that was hundreds of scouting missions)
+    const near = ctx.owned
+      .filter((v) => d(v) <= 70)
+      .sort((a, b) => a.points - b.points || d(a) - d(b))
+      .slice(0, 8);
+    for (const v of near) cands.push({ t: v, kind: "player" });
+  }
 
   // does this bot go for YOU this turn? always when you hurt it (grudge); otherwise now and then, more often in war mode
   const campaign = Math.floor((ctx.now * SPEED) / (6 * HOUR)); // the same answer for 6 game hours, so a bot that scouts you is still after you when its scouts are back
@@ -289,6 +295,7 @@ export function planOptions(
             src.units.scout < (info?.lastSent ?? 0) * 2);
         return {
           ...base,
+          stuck,
           ratio: 0,
           viable: false,
           loot: 0,
@@ -458,8 +465,12 @@ function oneAction(
 
   // ---- no report on anything worth hitting: scout first ----
   if (!viable.length) {
-    const unknown = plan.options.filter((o) => !o.known);
-    if (!unknown.length || s.units.scout < 1) return null;
+    const unknown = plan.options.filter((o) => !o.known && !o.stuck); // never scout what it cannot beat or is already looking at
+    const flying = ctx.commands.filter(
+      (c) => c.clan === bot.name && c.kind === "scout" && c.arriveAt > ctx.now,
+    ).length;
+    if (!unknown.length || s.units.scout < 1 || flying >= 2 + A.launches)
+      return null; // and never flood the map with scouts
     const best = unknown.reduce((b, o) => (o.score > b.score ? o : b));
     sendScouts(
       lc,

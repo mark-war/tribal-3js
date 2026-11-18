@@ -15,6 +15,8 @@ import { PLAYER } from "../game/core/world";
 import { useGame } from "../game/store";
 import { dur } from "./fmt";
 
+const isOffensive = (u: UnitId) => UNITS[u].role === "offense";
+
 /**
  * Number boxes for the troops a village sends (nobles can never join a rally).
  * `only` limits the list to some unit types, for example the ones that can still make it in time.
@@ -31,7 +33,11 @@ function UnitPicker({
   only?: UnitId[];
 }) {
   const ids = UNIT_IDS.filter(
-    (u) => u !== "noble" && v.units[u] > 0 && (!only || only.includes(u)),
+    (u) =>
+      u !== "noble" &&
+      isOffensive(u) &&
+      v.units[u] > 0 &&
+      (!only || only.includes(u)),
   );
   if (!ids.length) return <small>No troops at home to send.</small>;
   return (
@@ -108,11 +114,18 @@ function RallyCard({ r }: { r: Rally }) {
             if (s.buildings.rally < 1) return null;
             const fits = UNIT_IDS.filter(
               (u) =>
-                u !== "noble" && s.units[u] > 0 && unitEta(s, host, u) <= left,
+                u !== "noble" &&
+                isOffensive(u) &&
+                s.units[u] > 0 &&
+                unitEta(s, host, u) <= left,
             );
             if (!fits.length) return null;
             const slow = UNIT_IDS.filter(
-              (u) => u !== "noble" && s.units[u] > 0 && !fits.includes(u),
+              (u) =>
+                u !== "noble" &&
+                isOffensive(u) &&
+                s.units[u] > 0 &&
+                !fits.includes(u),
             ).reduce((n, u) => n + s.units[u], 0);
             const all = Object.fromEntries(
               UNIT_IDS.map((u) => [u, fits.includes(u) ? s.units[u] : 0]),
@@ -430,7 +443,12 @@ export default function RallyPanel({ onClose }: { onClose: () => void }) {
           {rallies.length ? (
             rallies.map((r) => <RallyCard key={r.id} r={r} />)
           ) : (
-            <small>No rally is open.</small>
+            <div>
+              <small>
+                No village has offensive troops that can arrive before the rally
+                leaves (Rally Point required).
+              </small>
+            </div>
           )}
         </div>
       </div>

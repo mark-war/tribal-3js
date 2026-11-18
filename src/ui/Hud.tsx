@@ -213,6 +213,7 @@ export default function Hud() {
     cursor,
     picked,
     rivals,
+    movePaladin,
   } = useGame();
   useGame((s) => s.now); // re-render on tick
   const [left, setLeft] = useState<"buildings" | "army">("buildings");
@@ -286,6 +287,7 @@ export default function Hud() {
   const free = popFree(v, commands, villages);
   const mine = Object.values(villages).filter((x) => x.owner === PLAYER);
   const t = target ? (villages[target.id] ?? target) : null;
+
   // beginner protection: bots can't attack you (and you can't attack them) at first
   const protLeft = protectionLeftHours(
     worldAgeHours(),
@@ -901,6 +903,26 @@ export default function Hud() {
                     </button>
                   </>
                 )}
+                {paladinExists &&
+                  t.owner === PLAYER &&
+                  (t.units.paladin ?? 0) === 0 &&
+                  !commands.some(
+                    (c) =>
+                      !c.clan &&
+                      (c.kind === "paladin_move" ||
+                        (c.units.paladin ?? 0) > 0) &&
+                      c.arriveAt > Date.now(),
+                  ) && (
+                    <button
+                      style={{ marginTop: 4, width: "100%" }}
+                      onClick={() => {
+                        const err = movePaladin(t.id);
+                        if (err) flash({ text: err, report: null });
+                      }}
+                    >
+                      🦸 Move Paladin here
+                    </button>
+                  )}
                 <QuickSend
                   key={t.id}
                   v={v}

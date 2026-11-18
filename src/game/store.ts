@@ -289,6 +289,7 @@ interface GameState {
     id: string,
     patch: { name?: string; waves?: WaveDraft[] },
   ) => void;
+  movePaladin: (toId: string) => string | null;
 }
 
 const name = (id: UnitId) => UNITS[id].name;
@@ -937,6 +938,66 @@ export const useGame = create<GameState>()(
           ),
         }),
 
+      movePaladin: (toId: string) => {
+        const s = get();
+        const now = Date.now();
+        const to0 = s.villages[toId];
+
+        if (!to0 || to0.owner !== PLAYER)
+          return "You can only move the Paladin to one of your villages.";
+
+        // Already there?
+        if ((to0.units.paladin ?? 0) > 0)
+          return "The Paladin is already in that village.";
+
+        // Already on the road?
+        const onRoad = s.commands.some(
+          (c) =>
+            !c.clan &&
+            (c.kind === "paladin_move" || (c.units.paladin ?? 0) > 0) &&
+            c.arriveAt > now,
+        );
+        if (onRoad) return "The Paladin is already marching.";
+
+        // Find which of your villages has him at home
+        const from0 = Object.values(s.villages).find(
+          (v) => v.owner === PLAYER && (v.units.paladin ?? 0) > 0,
+        );
+        if (!from0) return "You have no Paladin.";
+
+        if (from0.id === toId) return "The Paladin is already there.";
+
+        const from = settle(normalizeVillage(from0), now);
+        if (from.buildings.rally < 1)
+          return "Build a Rally Point in the Paladin's village first.";
+
+        from.units.paladin -= 1;
+
+        const units = { ...emptyUnits(), paladin: 1 };
+        const ms = travelMs([from.x, from.y], [to0.x, to0.y], units);
+
+        set({
+          villages: { ...s.villages, [from.id]: from },
+          commands: [
+            ...s.commands,
+            {
+              id: crypto.randomUUID(),
+              kind: "paladin_move",
+              fromId: from.id,
+              toId,
+              fromXY: [from.x, from.y],
+              toXY: [to0.x, to0.y],
+              units,
+              loot: emptyCost(),
+              departAt: now,
+              arriveAt: now + ms,
+              smithy: from.buildings.smithy,
+            },
+          ],
+        });
+        return null;
+      },
+
       /** Called ~4x/sec. Only resolves due commands; villages settle lazily on demand. */
       tick: () => {
         const now = Date.now();
@@ -1212,6 +1273,21 @@ export const useGame = create<GameState>()(
                 c.id,
                 `🛡 Support from ${villages[c.fromId]?.name ?? c.fromId} arrived at ${host.name}`,
               );
+            continue;
+          }
+
+          if (c.kind === "paladin_move") {
+            const base =
+              villages[c.toId] ?? villageAt(c.toXY[0], c.toXY[1], now);
+            if (!base || base.owner !== PLAYER) {
+              // village lost or missing → send him back
+              goHome(c.units);
+              continue;
+            }
+            const dest = settle(normalizeVillage(base), now);
+            dest.units.paladin = (dest.units.paladin ?? 0) + 1;
+            villages[dest.id] = dest;
+            say(c.id, `🦸 The Paladin arrived at ${dest.name}`);
             continue;
           }
 

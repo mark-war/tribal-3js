@@ -73,7 +73,8 @@ export interface Command {
     | "expand"
     | "strike"
     | "rally"
-    | "return";
+    | "return"
+    | "paladin_move";
   fromId: string;
   toId: string;
   fromXY: [number, number];
