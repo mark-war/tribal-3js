@@ -1,4 +1,4 @@
-import { resolveWaves } from "../game/presets";
+import { ALL, DEFAULT_PRESETS, resolveWaves } from "../game/presets";
 import { useState } from "react";
 import { BUILDINGS, BUILDING_IDS } from "../game/config/buildings";
 import { UNITS, UNIT_IDS } from "../game/config/units";
@@ -143,6 +143,30 @@ export default function QuickSend({
           ))}
         <span className="chip" onClick={() => setSel({ ...v.units })}>
           All
+        </span>
+        <span
+          className="chip"
+          onClick={() =>
+            setSel({
+              ...(DEFAULT_PRESETS[1].id === "default-strike"
+                ? resolveWaves([DEFAULT_PRESETS[1].waves[0]], v.units)[0]
+                : {}),
+            })
+          }
+        >
+          Strike
+        </span>
+        <span
+          className="chip"
+          onClick={() =>
+            setSel({
+              ...(DEFAULT_PRESETS[1].id === "default-raid"
+                ? resolveWaves([DEFAULT_PRESETS[1].waves[0]], v.units)[0]
+                : {}),
+            })
+          }
+        >
+          Raid
         </span>
         <span className="chip" onClick={() => setSel({})}>
           Clear

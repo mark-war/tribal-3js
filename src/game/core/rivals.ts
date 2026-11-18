@@ -73,7 +73,7 @@ export const MAX_CATCHUP = 2; // safety bound on raids launched in one step
 export const respawnMs = () => (6 * HOUR) / SPEED; // a wiped-out bot starts again 6 game hours later
 const MAX_RANGE = 90;
 export const expandIntervalMs = () => (36 * HOUR) / SPEED; // the rising kingdom sends a noble run about every 36 game hours
-const MAX_HOLDINGS = 6; // villages a bot can take on its own
+const MAX_HOLDINGS = 1000; // villages a bot can take on its own
 const BUILD_CAP: Partial<Record<BuildingId, number>> = {
   timber: 20,
   clay: 20,
