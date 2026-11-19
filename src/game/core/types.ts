@@ -184,6 +184,7 @@ export interface Preset {
   id: string;
   name: string;
   waves: WaveDraft[];
+  presetsVersion?: number; // if absent, the preset is from before we started versioning them
 }
 /** A wave ready to be committed: lands exactly at `arriveAt`. */
 export interface PlanOrder {

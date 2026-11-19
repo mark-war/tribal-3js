@@ -126,6 +126,12 @@ export default function QuickSend({
   return (
     <div style={{ marginTop: 6 }}>
       <div>
+        <span className="chip" onClick={() => setSel({ ...v.units })}>
+          All
+        </span>
+        <span className="chip" onClick={() => setSel({})}>
+          Clear
+        </span>
         {presets
           .filter(
             (p) =>
@@ -141,36 +147,6 @@ export default function QuickSend({
               {p.name}
             </span>
           ))}
-        <span className="chip" onClick={() => setSel({ ...v.units })}>
-          All
-        </span>
-        <span
-          className="chip"
-          onClick={() =>
-            setSel({
-              ...(DEFAULT_PRESETS[1].id === "default-strike"
-                ? resolveWaves([DEFAULT_PRESETS[1].waves[0]], v.units)[0]
-                : {}),
-            })
-          }
-        >
-          Strike
-        </span>
-        <span
-          className="chip"
-          onClick={() =>
-            setSel({
-              ...(DEFAULT_PRESETS[1].id === "default-raid"
-                ? resolveWaves([DEFAULT_PRESETS[1].waves[0]], v.units)[0]
-                : {}),
-            })
-          }
-        >
-          Raid
-        </span>
-        <span className="chip" onClick={() => setSel({})}>
-          Clear
-        </span>
       </div>
 
       {UNIT_IDS.filter((u) => v.units[u] > 0).map((u: UnitId) => (

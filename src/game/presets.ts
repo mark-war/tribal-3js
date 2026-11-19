@@ -1,6 +1,8 @@
 import { UNITS, UNIT_IDS } from "./config/units";
 import type { Preset, UnitId, Units } from "./core/types";
 
+export const PRESETS_VERSION = 2;
+
 /** In a preset, a unit count of -1 means "all I have of it": the preset stays up to date as your army grows. */
 export const ALL = -1;
 const OFFENSE = UNIT_IDS.filter((u) => UNITS[u].role === "offense");
@@ -33,8 +35,8 @@ export const DEFAULT_PRESETS: Preset[] = [
   },
   {
     id: "default-scout",
-    name: "🔍 Scout ×3",
-    waves: [{ kind: "scout", units: { scout: 3 }, offset: 0, cat: "wall" }],
+    name: "🔍 Scout",
+    waves: [{ kind: "scout", units: { scout: ALL }, offset: 0, cat: "wall" }],
   },
   {
     id: "default-noble-train",

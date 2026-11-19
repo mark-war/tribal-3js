@@ -6,7 +6,7 @@ export function WorldNews() {
   return (
     <div style={{ maxHeight: 240, overflowY: "auto" }}>
       {news.map((n) => (
-        <div key={n.id}>
+        <div key={n.text}>
           <small>{new Date(n.at).toLocaleTimeString()}</small> {n.text}
         </div>
       ))}

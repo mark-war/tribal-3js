@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { DEFAULT_PRESETS } from "./presets";
+import { DEFAULT_PRESETS, PRESETS_VERSION } from "./presets";
 import { BUILDINGS } from "./config/buildings";
 import { UNIT_IDS, UNITS } from "./config/units";
 import {
@@ -241,6 +241,7 @@ interface GameState {
   renameVillage: (id: string, name: string) => void;
   hero: { xp: number }; // the single Paladin's experience
   presets: Preset[]; // saved War Table operations
+  presetsVersion?: number;
   intel: Record<string, Intel>; // last successful scout of each village
   view: "village" | "world";
   mode: "2d" | "3d";
@@ -2207,6 +2208,25 @@ export const useGame = create<GameState>()(
           };
         }
         return p;
+      },
+
+      merge: (persisted: any, current) => {
+        const p = (persisted ?? {}) as Partial<GameState>;
+        const saved = p.presets ?? current.presets;
+        // a different PRESETS_VERSION means presets.ts changed: the built-in presets are replaced by the new ones
+        // (your own presets stay; edits you made to a built-in one are lost when that happens)
+        const presets =
+          p.presetsVersion === PRESETS_VERSION
+            ? saved
+            : [
+                ...saved.map(
+                  (x) => DEFAULT_PRESETS.find((d) => d.id === x.id) ?? x,
+                ),
+                ...DEFAULT_PRESETS.filter(
+                  (d) => !saved.some((x) => x.id === d.id),
+                ),
+              ];
+        return { ...current, ...p, presets, presetsVersion: PRESETS_VERSION };
       },
     },
   ),
