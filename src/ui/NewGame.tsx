@@ -20,8 +20,12 @@ export default function NewGame({ onClose }: { onClose: () => void }) {
     stats,
     worldClock,
     luck: luckNow,
+    morale: moraleNow,
+    night: nightNow,
   } = useGame();
   const [luck, setLuck] = useState(luckNow);
+  const [morale, setMorale] = useState(moraleNow);
+  const [night, setNight] = useState(nightNow);
   const [speed, setSpeed] = useState(gameSpeed);
   const [mode, setMode] = useState<RivalMode>(rivalMode);
   const [name, setName] = useState("");
@@ -92,6 +96,26 @@ export default function NewGame({ onClose }: { onClose: () => void }) {
               🍀 Luck in battles (±25% on each attack)
             </label>
           </div>
+          <div className="row">
+            <label title="Morale: an attack on a much smaller player counts for less (down to 30%–50%), like the protection for small players in the original.">
+              <input
+                type="checkbox"
+                checked={morale}
+                onChange={(e) => setMorale(e.target.checked)}
+              />{" "}
+              😓 Morale (attacks on much smaller players weaken)
+            </label>
+          </div>
+          <div className="row">
+            <label title="Night bonus: while it is night on the world clock (0:00–8:00) defenders fight with double strength, except barbarians.">
+              <input
+                type="checkbox"
+                checked={night}
+                onChange={(e) => setNight(e.target.checked)}
+              />{" "}
+              🌙 Night bonus (defense ×2 from 0:00 to 8:00)
+            </label>
+          </div>
           <small>
             You can change speed and rivals later from the top bar. The world
             has been running for {Math.round(worldClock.age)} game hours.
@@ -108,7 +132,7 @@ export default function NewGame({ onClose }: { onClose: () => void }) {
           <button
             style={{ width: "100%", marginTop: 8, background: "#a33" }}
             onClick={() => {
-              newGame({ speed, mode, name, luck });
+              newGame({ speed, mode, name, luck, morale, night });
               onClose();
             }}
           >

@@ -19,7 +19,9 @@ import {
   recallWindowMs,
   settle,
   travelMs,
+  worldAgeHours,
 } from "../game/core/economy";
+import { NIGHT, isNightAt, moraleFor, pointsOf } from "../game/core/modifiers";
 import { PLAYER, rivalInfo, villageAt } from "../game/core/world";
 import type { BuildingId, Units, UnitId, WaveDraft } from "../game/core/types";
 import { resolveWaves } from "../game/presets";
@@ -69,6 +71,8 @@ export default function WarTable({
     savePreset,
     deletePreset,
     updatePreset,
+    morale: moraleOn,
+    night: nightOn,
   } = useGame();
   useGame((s) => s.now); // live clock
   const now = Date.now();
@@ -138,6 +142,20 @@ export default function WarTable({
   const order = active
     .filter((w) => kindOf(w) === "attack")
     .sort((a, b) => a.offset - b.offset);
+  const foe = t?.owner ?? null; // morale and the night bonus only count against other players
+  const moraleNow =
+    moraleOn && foe
+      ? moraleFor(
+          pointsOf(villages, PLAYER),
+          pointsOf(villages, foe),
+          worldAgeHours(),
+        )
+      : 1;
+  const nightPer = order.map((w) =>
+    nightOn && foe && isNightAt(worldAgeHours(T0 + w.offset * 1000))
+      ? NIGHT.mult
+      : 1,
+  );
   const sim =
     intelFull && order.length
       ? simulateWaves(
@@ -145,6 +163,7 @@ export default function WarTable({
           intelFull,
           v.buildings.smithy,
           heroLevel(hero.xp),
+          { morale: moraleNow, defMult: nightPer },
         )
       : null;
   const simOf = (w: Wave) => (sim ? sim[order.indexOf(w)] : undefined);

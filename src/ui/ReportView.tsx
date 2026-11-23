@@ -212,6 +212,19 @@ function Battle({
               of its strength (×{(1 + d.luck).toFixed(2)}).
             </li>
           )}
+          {d.morale !== undefined && (
+            <li>
+              😓 Morale: {defending ? "their" : "your"} attack hit a much
+              smaller player, so it counted for only{" "}
+              <b>{Math.round(d.morale * 100)}%</b> of its strength.
+            </li>
+          )}
+          {d.night && (
+            <li>
+              🌙 Night bonus: it was night in the world, so the defenders fought
+              with <b>double</b> strength (the wall too).
+            </li>
+          )}
           {known && p.rating && p.defense !== undefined && (
             <>
               <li>
@@ -490,7 +503,7 @@ function simSeed(
   if (d.kind === "battle") {
     if (!d.defender.known || !d.defender.before) return null;
     const luck = d.luck ?? 0;
-    const raw = d.attacker.bonus / (1 + luck); // the bonus in the report includes luck (a fraction: +0.12 = +12%)
+    const raw = d.attacker.bonus; // Smithy x Paladin only: luck and morale are kept apart (luck is a fraction: +0.12 = +12%)
     const heroMult =
       d.attacker.sent.paladin > 0
         ? 1 + HERO_ATTACK_PER_LEVEL * d.attacker.heroLevel
@@ -511,6 +524,8 @@ function simSeed(
       defSmithy,
       heroLvl: d.attacker.heroLevel || 1,
       luck,
+      morale: d.morale ?? 1,
+      night: !!d.night,
       note: "Loaded from the report (with the luck it had).",
     };
   }

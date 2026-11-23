@@ -1,4 +1,4 @@
-import { ALL, DEFAULT_PRESETS, resolveWaves } from "../game/presets";
+import { resolveWaves } from "../game/presets";
 import { useState } from "react";
 import { BUILDINGS, BUILDING_IDS } from "../game/config/buildings";
 import { UNITS, UNIT_IDS } from "../game/config/units";
@@ -17,7 +17,8 @@ import {
   resolveScout,
   simulateWaves,
 } from "../game/core/combat";
-import { garrison, travelMs } from "../game/core/economy";
+import { garrison, travelMs, worldAgeHours } from "../game/core/economy";
+import { NIGHT, isNightAt, moraleFor, pointsOf } from "../game/core/modifiers";
 import { PLAYER } from "../game/core/world";
 import type {
   BuildingId,
@@ -50,7 +51,15 @@ export default function QuickSend({
   t: Village;
   onWar: (seed: WaveDraft) => void;
 }) {
-  const { intel, hero, plan, presets } = useGame();
+  const {
+    intel,
+    hero,
+    plan,
+    presets,
+    villages,
+    morale: moraleOn,
+    night: nightOn,
+  } = useGame();
   useGame((s) => s.now);
   const now = Date.now();
   const own = t.owner === PLAYER;
@@ -81,6 +90,19 @@ export default function QuickSend({
           smithy: intelT.smithy,
         }
       : null;
+  const foe = t.owner; // morale and the night bonus only count against other players
+  const moraleNow =
+    moraleOn && foe
+      ? moraleFor(
+          pointsOf(villages, PLAYER),
+          pointsOf(villages, foe),
+          worldAgeHours(),
+        )
+      : 1;
+  const nightNow =
+    nightOn && foe && isNightAt(worldAgeHours(Date.now() + tm(strike)))
+      ? NIGHT.mult
+      : 1;
   const sim =
     intelFull && hasStrike
       ? simulateWaves(
@@ -88,6 +110,7 @@ export default function QuickSend({
           intelFull,
           v.buildings.smithy,
           heroLevel(hero.xp),
+          { morale: moraleNow, defMult: nightNow },
         )[0]
       : null;
   const enemyScouts = intelT?.units?.scout ?? intelT?.enemyScouts;
@@ -126,12 +149,6 @@ export default function QuickSend({
   return (
     <div style={{ marginTop: 6 }}>
       <div>
-        <span className="chip" onClick={() => setSel({ ...v.units })}>
-          All
-        </span>
-        <span className="chip" onClick={() => setSel({})}>
-          Clear
-        </span>
         {presets
           .filter(
             (p) =>
@@ -147,6 +164,12 @@ export default function QuickSend({
               {p.name}
             </span>
           ))}
+        <span className="chip" onClick={() => setSel({ ...v.units })}>
+          All
+        </span>
+        <span className="chip" onClick={() => setSel({})}>
+          Clear
+        </span>
       </div>
 
       {UNIT_IDS.filter((u) => v.units[u] > 0).map((u: UnitId) => (

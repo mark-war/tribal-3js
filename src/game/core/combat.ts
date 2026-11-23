@@ -135,10 +135,12 @@ export function battlePowers(
   wallLevel: number,
   attackBonus = 1,
   defBonus = 1,
+  defMult = 1,
 ) {
   const effWall = wallLevel - ramPreLevels(att.ram, wallLevel); // the level the wall counts as during the fight
   const shares = attackShares(att);
   const rating = defenseRating(def, effWall, defBonus);
+  if (defMult !== 1) for (const k of ATTACK_CLASSES) rating[k] *= defMult; // the night bonus doubles every defender and the wall
   const a = totalAttack(att) * attackBonus;
   // Defense is weighted by what the attacker actually brought: send the class they are weakest against.
   const d = ATTACK_CLASSES.reduce((s, k) => s + shares[k] * rating[k], 0);
@@ -156,8 +158,16 @@ export function resolveBattle(
   wallLevel: number,
   attackBonus = 1,
   defBonus = 1,
+  defMult = 1,
 ): CombatResult {
-  const { a, d } = battlePowers(att, def, wallLevel, attackBonus, defBonus);
+  const { a, d } = battlePowers(
+    att,
+    def,
+    wallLevel,
+    attackBonus,
+    defBonus,
+    defMult,
+  );
   const attackerWins = a > d;
   const lossRatio = Math.pow(Math.min(a, d) / Math.max(a, d, 1), 1.5);
   if (attackerWins) {
@@ -233,24 +243,29 @@ export interface SimWave {
   conquered: boolean;
 }
 /** Plays waves one after another against scouted intel (waves must be given in landing order). An estimate: intel ages. */
+/** `mods`: morale (0..1, multiplies the attack) and defMult (the night bonus, one number or one per wave) for the world's rules. */
 export function simulateWaves(
   waves: Units[],
   intel: { units: Units; wall: number; loyalty: number; smithy?: number },
   smithy: number,
   heroLvl: number,
+  mods: { morale?: number; defMult?: number | number[] } = {},
 ): SimWave[] {
   let def = { ...intel.units };
   let wall = intel.wall;
   let loyalty = intel.loyalty;
   let conquered = false;
-  return waves.map((w) => {
+  return waves.map((w, i) => {
     if (conquered) return { wins: true, attackerLeft: w, loyalty, conquered }; // already ours: they just arrive
     const r = resolveBattle(
       w,
       def,
       wall,
-      attackBonusFor(smithy, w, heroLvl),
+      attackBonusFor(smithy, w, heroLvl) * (mods.morale ?? 1),
       defenseBonusFor(intel.smithy ?? 0),
+      Array.isArray(mods.defMult)
+        ? (mods.defMult[i] ?? 1)
+        : (mods.defMult ?? 1),
     );
     def = r.defenderLeft;
     wall = r.wallAfter;

@@ -31,6 +31,7 @@ import {
   hidingProtect,
   worldAgeHours,
 } from "../game/core/economy";
+import { NIGHT, gameHourAt, isNightAt } from "../game/core/modifiers";
 import { PLAYER, rivalInfo } from "../game/core/world";
 import { protectionLeftHours, type RivalMode } from "../game/core/rivals";
 import { AGGRESSION } from "../game/core/botbrain";
@@ -68,6 +69,7 @@ import { kindIcon } from "./icons";
 import ReportView from "./ReportView";
 import WarTable from "./WarTable";
 import RallyPanel from "./RallyPanel";
+import { locatePaladin } from "../game/core/paladin";
 
 type Req = { building: BuildingId; level: number };
 type TipState = { x: number; y: number; node: ReactNode } | null;
@@ -206,6 +208,7 @@ export default function Hud() {
     aiStatus,
     botAggression,
     setBotAggression,
+    night,
     selectTarget,
     renameVillage,
     gameSpeed,
@@ -287,15 +290,37 @@ export default function Hud() {
   const free = popFree(v, commands, villages);
   const mine = Object.values(villages).filter((x) => x.owner === PLAYER);
   const t = target ? (villages[target.id] ?? target) : null;
-
   // beginner protection: bots can't attack you (and you can't attack them) at first
   const protLeft = protectionLeftHours(
     worldAgeHours(),
     mine.reduce((n, x) => n + x.points, 0),
   );
 
-  // ---- strategy helpers: own weak spot, attack mix, and a prediction from the last scout report ----
-  const paladinExists = paladinCount(villages, commands) > 0;
+  const spot = locatePaladin(villages, commands); // where he is: home, standing as support, on the road or in training
+  const paladinExists = spot !== null;
+
+  const spotName = (id: string) => villages[id]?.name ?? id;
+
+  const spotText = !spot
+    ? ""
+    : spot.where === "home"
+      ? `at ${spotName(spot.villageId)}`
+      : spot.where === "support"
+        ? `standing as support in ${spotName(spot.hostId)}`
+        : spot.where === "training"
+          ? `in training at ${spotName(spot.villageId)}`
+          : `on the road to ${spotName(spot.toId)}`;
+
+  const spotVillage = !spot
+    ? undefined
+    : spot.where === "home"
+      ? spot.villageId
+      : spot.where === "support"
+        ? spot.hostId
+        : spot.where === "training"
+          ? spot.villageId
+          : undefined;
+
   const hl = heroLevel(hero.xp);
   const rating = defenseRating(
     garrison(v),
@@ -447,17 +472,48 @@ export default function Hud() {
         </span>
         {paladinExists && (
           <span
-            title={`Paladin level ${hl}: +${Math.round(hl * HERO_ATTACK_PER_LEVEL * 100)}% attack to the armies he leads`}
+            style={{
+              cursor:
+                spotVillage && villages[spotVillage]?.owner === PLAYER
+                  ? "pointer"
+                  : undefined,
+            }}
+            onClick={() =>
+              spotVillage &&
+              villages[spotVillage]?.owner === PLAYER &&
+              setActive(spotVillage)
+            }
+            title={`Paladin level ${hl}: +${Math.round(
+              hl * HERO_ATTACK_PER_LEVEL * 100,
+            )}% attack to the armies he leads. He is ${spotText}.${
+              spotVillage ? " Click to go to that village." : ""
+            }`}
           >
             🦸 Lv {hl}
             <small>
               {" "}
               {hero.xp}
-              {HERO_XP_LEVELS[hl] ? `/${HERO_XP_LEVELS[hl]}` : " (max)"} xp
+              {HERO_XP_LEVELS[hl] ? `/${HERO_XP_LEVELS[hl]}` : " (max)"} xp ·{" "}
+              {spotText}
             </small>
           </span>
         )}
         {v.loyalty < 100 && <span>👑 loyalty {Math.floor(v.loyalty)}</span>}
+        {night &&
+          (() => {
+            const age = worldAgeHours();
+            const h = gameHourAt(age);
+            const isNight = isNightAt(age);
+            return (
+              <span
+                title={`World clock (game time). Night bonus: defenders fight with double strength from ${NIGHT.from}:00 to ${NIGHT.to}:00, except barbarians.`}
+                className={isNight ? "warn" : ""}
+              >
+                {isNight ? "🌙" : "☀️"} {String(Math.floor(h)).padStart(2, "0")}
+                :{String(Math.floor((h % 1) * 60)).padStart(2, "0")}
+              </span>
+            );
+          })()}
         {protLeft > 0 && (
           <span title="Beginner protection: bots can't attack you and you can't attack them (barbarians are fine). It ends after 24 game hours or at 800 points.">
             🛡 Protected {Math.ceil(protLeft)}h
@@ -903,24 +959,31 @@ export default function Hud() {
                     </button>
                   </>
                 )}
-                {paladinExists &&
-                  t.owner === PLAYER &&
-                  (t.units.paladin ?? 0) === 0 &&
-                  !commands.some(
-                    (c) =>
-                      !c.clan &&
-                      (c.kind === "paladin_move" ||
-                        (c.units.paladin ?? 0) > 0) &&
-                      c.arriveAt > Date.now(),
-                  ) && (
+                {t.owner === PLAYER &&
+                  spot &&
+                  !(spot.where === "home" && spot.villageId === t.id) && (
                     <button
                       style={{ marginTop: 4, width: "100%" }}
+                      disabled={
+                        spot.where === "training" || spot.where === "marching"
+                      }
+                      title={
+                        spot.where === "training"
+                          ? "He is still in training"
+                          : spot.where === "marching"
+                            ? "He is on the road: wait until he arrives"
+                            : `He is ${spotText}`
+                      }
                       onClick={() => {
                         const err = movePaladin(t.id);
                         if (err) flash({ text: err, report: null });
                       }}
                     >
-                      🦸 Move Paladin here
+                      🦸{" "}
+                      {spot.where === "support" && spot.hostId === t.id
+                        ? "Make the Paladin a defender here"
+                        : "Move the Paladin here"}
+                      <small> ({spotText})</small>
                     </button>
                   )}
                 <QuickSend

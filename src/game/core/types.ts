@@ -95,7 +95,9 @@ export interface Command {
 
 export interface BattleDetail {
   kind: "battle";
-  luck?: number; // the attack's luck multiplier (0.75..1.25)
+  luck?: number; // the attack's luck, a fraction: +0.12 = the attack counted for +12%
+  morale?: number; // the attacker's morale when it was below 100% (0.3..1)
+  night?: boolean; // the night bonus doubled the defense
   perspective: "attack" | "defense"; // 'defense' is for when rivals can attack you
   outcome: "win" | "loss" | "conquered";
   attacker: {
@@ -184,7 +186,6 @@ export interface Preset {
   id: string;
   name: string;
   waves: WaveDraft[];
-  presetsVersion?: number; // if absent, the preset is from before we started versioning them
 }
 /** A wave ready to be committed: lands exactly at `arriveAt`. */
 export interface PlanOrder {

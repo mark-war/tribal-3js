@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { DEFAULT_PRESETS, PRESETS_VERSION } from "./presets";
+import { DEFAULT_PRESETS } from "./presets";
+import { NIGHT, isNightAt, moraleFor, pointsOf } from "./core/modifiers";
 import { BUILDINGS } from "./config/buildings";
 import { UNIT_IDS, UNITS } from "./config/units";
 import {
@@ -107,6 +108,7 @@ import type {
   Village,
   WaveDraft,
 } from "./core/types";
+import { locatePaladin } from "./core/paladin";
 
 export const SAVE_KEY = "tribal-3js-save";
 
@@ -167,6 +169,8 @@ function freshGame(o: {
   mode: RivalMode;
   name?: string;
   luck?: boolean;
+  morale?: boolean;
+  night?: boolean;
 }) {
   const now = Date.now();
   const home = newPlayerVillage("home", PLAYER, 5, 5, now);
@@ -187,6 +191,8 @@ function freshGame(o: {
     startedAt: now,
     gameSpeed: o.speed,
     luck: o.luck ?? true,
+    morale: o.morale ?? true,
+    night: o.night ?? true,
     stats: {},
     news: [] as { at: number; text: string }[],
     aiAdvice: {},
@@ -224,9 +230,15 @@ interface GameState {
     mode: RivalMode;
     name?: string;
     luck?: boolean;
+    morale?: boolean;
+    night?: boolean;
   }) => void;
   luck: boolean; // luck on: every attack counts for 75%..125% of its strength
   setLuck: (on: boolean) => void;
+  morale: boolean; // morale on: an attack on a much smaller player counts for less
+  setMorale: (on: boolean) => void;
+  night: boolean; // night bonus on: defenders fight with double strength at night (game clock)
+  setNight: (on: boolean) => void;
   botAggression: number; // 0 Calm · 1 Normal · 2 Aggressive · 3 Relentless: how bold the bots are (they still scout and only attack what they can beat)
   setBotAggression: (n: number) => void;
   gameSpeed: number; // 1 = real time; 60 = one real minute is one game hour
@@ -241,7 +253,6 @@ interface GameState {
   renameVillage: (id: string, name: string) => void;
   hero: { xp: number }; // the single Paladin's experience
   presets: Preset[]; // saved War Table operations
-  presetsVersion?: number;
   intel: Record<string, Intel>; // last successful scout of each village
   view: "village" | "world";
   mode: "2d" | "3d";
@@ -290,6 +301,7 @@ interface GameState {
     id: string,
     patch: { name?: string; waves?: WaveDraft[] },
   ) => void;
+  /* */
   movePaladin: (toId: string) => string | null;
 }
 
@@ -346,6 +358,10 @@ export const useGame = create<GameState>()(
       gameSpeed: 60,
       luck: true,
       setLuck: (luck) => set({ luck }),
+      morale: true,
+      setMorale: (morale) => set({ morale }),
+      night: true,
+      setNight: (night) => set({ night }),
       botAggression: 3,
       setBotAggression: (botAggression) =>
         set({
@@ -792,6 +808,73 @@ export const useGame = create<GameState>()(
         });
       },
 
+      movePaladin: (toId) => {
+        const s = get();
+        const now = Date.now();
+        const to0 = s.villages[toId];
+        if (!to0 || to0.owner !== PLAYER)
+          return "You can only move the Paladin to one of your villages.";
+        const spot = locatePaladin(s.villages, s.commands);
+        if (!spot)
+          return "You have no Paladin (none at home, standing as support, on the road or in training). You can train one at the Statue.";
+        if (spot.where === "training")
+          return `The Paladin is still in training in ${s.villages[spot.villageId]?.name ?? spot.villageId}.`;
+        if (spot.where === "marching")
+          return `The Paladin is on the road (${spot.kind}) toward ${spot.toId}: he can be moved when he arrives.`;
+        if (spot.where === "home" && spot.villageId === toId)
+          return "The Paladin is already in that village.";
+
+        const villages = { ...s.villages };
+        const takeFrom = (id: string, stackOf?: string) => {
+          // remove him from where he stands and return that village (settled)
+          const h = settle(normalizeVillage(villages[id]), now);
+          if (stackOf) {
+            const st = { ...(h.stationed[stackOf] ?? emptyUnits()) };
+            st.paladin = Math.max(0, (st.paladin ?? 0) - 1);
+            const rest = { ...h.stationed };
+            if (UNIT_IDS.every((u) => (st[u] ?? 0) <= 0)) delete rest[stackOf];
+            else rest[stackOf] = st;
+            h.stationed = rest;
+          } else h.units.paladin = Math.max(0, (h.units.paladin ?? 0) - 1);
+          villages[h.id] = h;
+          return h;
+        };
+
+        // he is standing as support in the very village you picked: he simply becomes a normal defender there
+        if (spot.where === "support" && spot.hostId === toId) {
+          const h = takeFrom(toId, spot.originId);
+          h.units.paladin = (h.units.paladin ?? 0) + 1;
+          villages[h.id] = h;
+          set({ villages });
+          return null;
+        }
+        const from =
+          spot.where === "home"
+            ? takeFrom(spot.villageId)
+            : takeFrom(spot.hostId, spot.originId);
+        const units = { ...emptyUnits(), paladin: 1 };
+        set({
+          villages,
+          commands: [
+            ...s.commands,
+            {
+              id: crypto.randomUUID(),
+              kind: "paladin_move",
+              fromId: from.id,
+              toId,
+              fromXY: [from.x, from.y],
+              toXY: [to0.x, to0.y],
+              units,
+              loot: emptyCost(),
+              departAt: now,
+              arriveAt: now + travelMs([from.x, from.y], [to0.x, to0.y], units),
+              smithy: from.buildings.smithy,
+            },
+          ],
+        });
+        return null;
+      },
+
       recall: (id) => {
         const s = get();
         const now = Date.now();
@@ -939,66 +1022,6 @@ export const useGame = create<GameState>()(
           ),
         }),
 
-      movePaladin: (toId: string) => {
-        const s = get();
-        const now = Date.now();
-        const to0 = s.villages[toId];
-
-        if (!to0 || to0.owner !== PLAYER)
-          return "You can only move the Paladin to one of your villages.";
-
-        // Already there?
-        if ((to0.units.paladin ?? 0) > 0)
-          return "The Paladin is already in that village.";
-
-        // Already on the road?
-        const onRoad = s.commands.some(
-          (c) =>
-            !c.clan &&
-            (c.kind === "paladin_move" || (c.units.paladin ?? 0) > 0) &&
-            c.arriveAt > now,
-        );
-        if (onRoad) return "The Paladin is already marching.";
-
-        // Find which of your villages has him at home
-        const from0 = Object.values(s.villages).find(
-          (v) => v.owner === PLAYER && (v.units.paladin ?? 0) > 0,
-        );
-        if (!from0) return "You have no Paladin.";
-
-        if (from0.id === toId) return "The Paladin is already there.";
-
-        const from = settle(normalizeVillage(from0), now);
-        if (from.buildings.rally < 1)
-          return "Build a Rally Point in the Paladin's village first.";
-
-        from.units.paladin -= 1;
-
-        const units = { ...emptyUnits(), paladin: 1 };
-        const ms = travelMs([from.x, from.y], [to0.x, to0.y], units);
-
-        set({
-          villages: { ...s.villages, [from.id]: from },
-          commands: [
-            ...s.commands,
-            {
-              id: crypto.randomUUID(),
-              kind: "paladin_move",
-              fromId: from.id,
-              toId,
-              fromXY: [from.x, from.y],
-              toXY: [to0.x, to0.y],
-              units,
-              loot: emptyCost(),
-              departAt: now,
-              arriveAt: now + ms,
-              smithy: from.buildings.smithy,
-            },
-          ],
-        });
-        return null;
-      },
-
       /** Called ~4x/sec. Only resolves due commands; villages settle lazily on demand. */
       tick: () => {
         const now = Date.now();
@@ -1020,6 +1043,7 @@ export const useGame = create<GameState>()(
           advice: s.aiAdvice,
           commands: s.commands,
           aggression: s.botAggression,
+          mods: { morale: s.morale, night: s.night },
         });
         let newsAll = rv.news.length
           ? [...rv.news.map((text) => ({ at: now, text })), ...s.news].slice(
@@ -1277,21 +1301,6 @@ export const useGame = create<GameState>()(
             continue;
           }
 
-          if (c.kind === "paladin_move") {
-            const base =
-              villages[c.toId] ?? villageAt(c.toXY[0], c.toXY[1], now);
-            if (!base || base.owner !== PLAYER) {
-              // village lost or missing → send him back
-              goHome(c.units);
-              continue;
-            }
-            const dest = settle(normalizeVillage(base), now);
-            dest.units.paladin = (dest.units.paladin ?? 0) + 1;
-            villages[dest.id] = dest;
-            say(c.id, `🦸 The Paladin arrived at ${dest.name}`);
-            continue;
-          }
-
           if (c.kind === "trade") {
             // deliver, then the merchants walk home (a bot's caravan between its own villages too)
             const dest = settle(normalizeVillage(villages[c.toId]), now);
@@ -1340,13 +1349,21 @@ export const useGame = create<GameState>()(
             const wallBefore = tgt.buildings.wall;
             const loyaltyBefore = tgt.loyalty;
             const luck = s.luck ? luckOf(c.id) : 0; // the attacker's luck, -25%..+25% (0 when luck is switched off)
-            const bonus =
-              attackBonusFor(
-                c.smithy ?? 0,
-                { ...c.units, paladin: c.heroLevel ? 1 : 0 },
-                c.heroLevel ?? 0,
-              ) *
-              (1 + luck);
+            const baseBonus = attackBonusFor(
+              c.smithy ?? 0,
+              { ...c.units, paladin: c.heroLevel ? 1 : 0 },
+              c.heroLevel ?? 0,
+            ); // what the Smithy and the Paladin give (luck and morale are shown apart)
+            const morale = s.morale
+              ? moraleFor(
+                  pointsOf(villages, c.clan ?? null),
+                  pointsOf(villages, PLAYER),
+                  worldAgeHours(c.arriveAt),
+                )
+              : 1;
+            const nightMult =
+              s.night && isNightAt(worldAgeHours(c.arriveAt)) ? NIGHT.mult : 1;
+            const bonus = baseBonus * (1 + luck) * morale;
             const defBonus = defenseBonusFor(tgt.buildings.smithy);
             const pw = battlePowers(
               c.units,
@@ -1354,6 +1371,7 @@ export const useGame = create<GameState>()(
               wallBefore,
               bonus,
               defBonus,
+              nightMult,
             );
             const res = resolveBattle(
               c.units,
@@ -1361,6 +1379,7 @@ export const useGame = create<GameState>()(
               wallBefore,
               bonus,
               defBonus,
+              nightMult,
             );
             tgt.units = survivorsOf(tgt.units, defBefore, res.defenderLeft);
             tgt.stationed = Object.fromEntries(
@@ -1391,6 +1410,8 @@ export const useGame = create<GameState>()(
             const detail: BattleDetail = {
               kind: "battle",
               luck: s.luck ? luck : undefined,
+              morale: morale < 1 ? morale : undefined,
+              night: nightMult > 1 || undefined,
               perspective: "defense",
               outcome: conquered
                 ? "conquered"
@@ -1402,7 +1423,7 @@ export const useGame = create<GameState>()(
                 xy: c.fromXY,
                 sent: { ...c.units },
                 left: res.attackerLeft,
-                bonus,
+                bonus: baseBonus,
                 heroLevel: 0,
               },
               defender: {
@@ -1491,13 +1512,21 @@ export const useGame = create<GameState>()(
             const defBefore = garrison(tgt);
             const wallBefore = tgt.buildings.wall;
             const luck = s.luck ? luckOf(c.id) : 0; // the attacker's luck, -25%..+25% (0 when luck is switched off)
-            const bonus =
-              attackBonusFor(
-                c.smithy ?? 0,
-                { ...c.units, paladin: c.heroLevel ? 1 : 0 },
-                c.heroLevel ?? 0,
-              ) *
-              (1 + luck);
+            const baseBonus = attackBonusFor(
+              c.smithy ?? 0,
+              { ...c.units, paladin: c.heroLevel ? 1 : 0 },
+              c.heroLevel ?? 0,
+            ); // what the Smithy and the Paladin give (luck and morale are shown apart)
+            const morale = s.morale
+              ? moraleFor(
+                  pointsOf(villages, c.clan ?? null),
+                  pointsOf(villages, PLAYER),
+                  worldAgeHours(c.arriveAt),
+                )
+              : 1;
+            const nightMult =
+              s.night && isNightAt(worldAgeHours(c.arriveAt)) ? NIGHT.mult : 1;
+            const bonus = baseBonus * (1 + luck) * morale;
             const defBonus = defenseBonusFor(tgt.buildings.smithy); // YOUR village's smithy, for everyone standing in it
             const pw = battlePowers(
               c.units,
@@ -1505,6 +1534,7 @@ export const useGame = create<GameState>()(
               wallBefore,
               bonus,
               defBonus,
+              nightMult,
             );
             const res = resolveBattle(
               c.units,
@@ -1512,6 +1542,7 @@ export const useGame = create<GameState>()(
               wallBefore,
               bonus,
               defBonus,
+              nightMult,
             );
             tgt.units = survivorsOf(tgt.units, defBefore, res.defenderLeft); // your troops AND any support standing here share the losses
             tgt.stationed = Object.fromEntries(
@@ -1540,6 +1571,8 @@ export const useGame = create<GameState>()(
             const detail: BattleDetail = {
               kind: "battle",
               luck: s.luck ? luck : undefined,
+              morale: morale < 1 ? morale : undefined,
+              night: nightMult > 1 || undefined,
               perspective: "defense",
               outcome: res.attackerWins ? "win" : "loss",
               attacker: {
@@ -1547,7 +1580,7 @@ export const useGame = create<GameState>()(
                 xy: c.fromXY,
                 sent: { ...c.units },
                 left: res.attackerLeft,
-                bonus,
+                bonus: baseBonus,
                 heroLevel: 0,
               },
               defender: {
@@ -1683,7 +1716,10 @@ export const useGame = create<GameState>()(
             // a bot's army (the clearing army, or one noble wave) lands on a barbarian village or on another bot
             const bot = CLANS.find((k) => k.name === c.clan);
             if (!bot) continue;
-            const r = landStrike(c, villages, now, bot, s.luck);
+            const r = landStrike(c, villages, now, bot, s.luck, {
+              morale: s.morale,
+              night: s.night,
+            });
             Object.assign(villages, r.changed);
             for (const x of r.commands) commands.push(x);
             for (const t of r.news) worldNews.push({ at: now, text: t });
@@ -1797,6 +1833,26 @@ export const useGame = create<GameState>()(
             continue;
           }
 
+          // Handle Paladin relocation separately from normal troop arrivals
+          if (c.kind === "paladin_move") {
+            const dest = villages[c.toId];
+
+            if (!dest || dest.owner !== PLAYER) {
+              goHome(c.units);
+              continue;
+            }
+
+            const h = settle(normalizeVillage(dest), now);
+
+            // Add Paladin to the village's own army, NOT stationed support
+            h.units.paladin = (h.units.paladin ?? 0) + (c.units.paladin ?? 1);
+
+            villages[h.id] = h;
+            // say(c.id, `🦸 The Paladin arrived at ${h.name}`);
+
+            continue;
+          }
+
           // A wave that lands after an earlier wave already took the village must not attack your own garrison
           // (it would kill the troops that just stayed, or turn around and march home). It stays as support.
           if (target.owner === PLAYER) {
@@ -1823,8 +1879,7 @@ export const useGame = create<GameState>()(
           const heroLvl = heroLevel(heroXp);
           const luck = s.luck ? luckOf(c.id) : 0; // the attacker's luck for this march, -25%..+25% (0 when luck is switched off)
           const lk = s.luck ? luckNote(luck) : "";
-          const bonus =
-            attackBonusFor(c.smithy ?? 0, c.units, heroLvl) * (1 + luck);
+          const baseBonus = attackBonusFor(c.smithy ?? 0, c.units, heroLvl); // Smithy + Paladin (luck and morale are shown apart)
           const defBefore = garrison(target);
           const wallBefore = target.buildings.wall;
           const loyaltyBefore = target.loyalty;
@@ -1832,12 +1887,29 @@ export const useGame = create<GameState>()(
           const targetName = target.name;
           const fromName = villages[c.fromId]?.name ?? c.fromId;
           const defBonus = defenseBonusFor(target.buildings.smithy);
+          // morale and the night bonus only count against other players, never against barbarian villages
+          const morale =
+            s.morale && prevOwner !== null
+              ? moraleFor(
+                  pointsOf(villages, PLAYER),
+                  pointsOf(villages, prevOwner),
+                  worldAgeHours(c.arriveAt),
+                )
+              : 1;
+          const nightMult =
+            s.night &&
+            prevOwner !== null &&
+            isNightAt(worldAgeHours(c.arriveAt))
+              ? NIGHT.mult
+              : 1;
+          const bonus = baseBonus * (1 + luck) * morale;
           const pw = battlePowers(
             c.units,
             defBefore,
             wallBefore,
             bonus,
             defBonus,
+            nightMult,
           );
           const res = resolveBattle(
             c.units,
@@ -1845,6 +1917,7 @@ export const useGame = create<GameState>()(
             wallBefore,
             bonus,
             defBonus,
+            nightMult,
           );
           // fog of war (optional): if your whole army died, you learn nothing about the defenders
           const known =
@@ -1947,6 +2020,8 @@ export const useGame = create<GameState>()(
           const detail: BattleDetail = {
             kind: "battle",
             luck: s.luck ? luck : undefined,
+            morale: morale < 1 ? morale : undefined,
+            night: nightMult > 1 || undefined,
             perspective: "attack",
             outcome: conquered
               ? "conquered"
@@ -1958,7 +2033,7 @@ export const useGame = create<GameState>()(
               xy: c.fromXY,
               sent: { ...c.units },
               left: survivors,
-              bonus,
+              bonus: baseBonus,
               heroLevel: heroLvl,
             },
             defender: {
@@ -2111,6 +2186,8 @@ export const useGame = create<GameState>()(
         startedAt: s.startedAt,
         gameSpeed: s.gameSpeed,
         luck: s.luck,
+        morale: s.morale,
+        night: s.night,
         botAggression: s.botAggression,
         stats: s.stats,
         worldClock: s.worldClock,
@@ -2208,25 +2285,6 @@ export const useGame = create<GameState>()(
           };
         }
         return p;
-      },
-
-      merge: (persisted: any, current) => {
-        const p = (persisted ?? {}) as Partial<GameState>;
-        const saved = p.presets ?? current.presets;
-        // a different PRESETS_VERSION means presets.ts changed: the built-in presets are replaced by the new ones
-        // (your own presets stay; edits you made to a built-in one are lost when that happens)
-        const presets =
-          p.presetsVersion === PRESETS_VERSION
-            ? saved
-            : [
-                ...saved.map(
-                  (x) => DEFAULT_PRESETS.find((d) => d.id === x.id) ?? x,
-                ),
-                ...DEFAULT_PRESETS.filter(
-                  (d) => !saved.some((x) => x.id === d.id),
-                ),
-              ];
-        return { ...current, ...p, presets, presetsVersion: PRESETS_VERSION };
       },
     },
   ),

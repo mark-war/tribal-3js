@@ -401,6 +401,26 @@ export function botVillages(
   return out;
 }
 
+/** The `k` nearest barbarian villages to `from`, nearest first (one scan of the chunks around it). */
+export function nearestBarbarians(
+  from: [number, number],
+  now: number,
+  k = 8,
+): Village[] {
+  const found: { v: Village; d: number }[] = [];
+  const cx0 = Math.floor(from[0] / CHUNK),
+    cy0 = Math.floor(from[1] / CHUNK);
+  for (let cx = cx0 - 3; cx <= cx0 + 3; cx++)
+    for (let cy = cy0 - 3; cy <= cy0 + 3; cy++)
+      for (const v of chunkVillages(cx, cy, now))
+        if (v.owner === null)
+          found.push({ v, d: Math.hypot(v.x - from[0], v.y - from[1]) });
+  return found
+    .sort((p, q) => p.d - q.d)
+    .slice(0, k)
+    .map((x) => x.v);
+}
+
 /** The nearest barbarian village to `from` (the next target of a clan's noble run). */
 export function nearestBarbarian(
   from: [number, number],

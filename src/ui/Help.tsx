@@ -949,6 +949,23 @@ function EcoTab() {
         a bot sized exactly to your defense can still lose, or win more than it
         should.
       </p>
+      <h3>Morale 😓 and the night bonus 🌙</h3>
+      <p>
+        <b>Morale</b> protects small players: an attack on a player (or bot)
+        with far fewer points than the attacker counts for less than its full
+        strength, down to a floor of 30% that rises to 50% as the world ages. It
+        is 100% when the defender is as big as you or bigger, never a bonus, and
+        never applies to barbarian villages. The exact formula isn't published,
+        so this one is an approximation: 0.3 + defender points ÷ attacker
+        points. Both are the total points of all of a player's villages.{" "}
+        <b>Night bonus:</b> while it is night on the world clock (0:00–8:00,
+        shown in the top bar, game time: at ×60 a whole day takes 24 real
+        minutes), defenders fight with <b>double strength</b>, the wall
+        included, when the attack <i>lands</i>. Time your waves for the day. It
+        doesn't apply to barbarians or scouts. Both can be switched off in New
+        game; reports say when they counted, the war table's prediction includes
+        them, and bots count them when they decide what they can beat.
+      </p>
       <h3>War Table presets</h3>
       <p>
         The presets (Strike, Raid, Scout, Garrison, Noble train) are ordinary
@@ -1001,8 +1018,10 @@ export interface SimSeed {
   defSmithy: number;
   heroLvl: number;
   luck?: number;
+  morale?: number;
+  night?: boolean;
   note?: string;
-} // luck: a fraction, +0.12 = +12%
+} // luck: a fraction, +0.12 = +12%; morale 0.3..1
 
 function Sim({ seed }: { seed?: SimSeed | null }) {
   const [a, setA] = useState<Partial<Units>>(seed?.a ?? { axe: 20, ram: 4 });
@@ -1016,9 +1035,24 @@ function Sim({ seed }: { seed?: SimSeed | null }) {
   const [luckPct, setLuckPct] = useState(Math.round((seed?.luck ?? 0) * 100)); // luck: -25..+25 (% of the attack)
   const att = normalizeUnits(a);
   const def = normalizeUnits(d);
-  const bonus = attackBonusFor(smithy, att, heroLvl) * (1 + luckPct / 100);
-  const p = battlePowers(att, def, wall, bonus, defenseBonusFor(defSmithy));
-  const r = resolveBattle(att, def, wall, bonus, defenseBonusFor(defSmithy));
+  const [moralePct, setMoralePct] = useState(
+    Math.round((seed?.morale ?? 1) * 100),
+  ); // morale: 30..100 (% of the attack)
+  const [night, setNight] = useState(!!seed?.night); // night bonus: the defense counts double
+  const bonus =
+    attackBonusFor(smithy, att, heroLvl) *
+    (1 + luckPct / 100) *
+    (moralePct / 100);
+  const dm = night ? 2 : 1;
+  const p = battlePowers(att, def, wall, bonus, defenseBonusFor(defSmithy), dm);
+  const r = resolveBattle(
+    att,
+    def,
+    wall,
+    bonus,
+    defenseBonusFor(defSmithy),
+    dm,
+  );
   const nobles = r.attackerWins ? r.attackerLeft.noble : 0;
   const cats = r.attackerWins ? catapultLevels(r.attackerLeft.catapult) : 0;
   return (
@@ -1100,7 +1134,33 @@ function Sim({ seed }: { seed?: SimSeed | null }) {
             onChange={(e) => setDefSmithy(Math.min(20, int(e.target.value)))}
           />
         </label>
-        <label title="Luck changes how strong the attack counts: −25% to +25%. Every real attack gets a fixed random luck.">
+        <label title="Morale: an attack on a much smaller player counts for less (30%–100%).">
+          😓 Morale %{" "}
+          <input
+            type="number"
+            min={30}
+            max={100}
+            style={{ width: 52 }}
+            value={moralePct}
+            onChange={(e) =>
+              setMoralePct(
+                Math.max(
+                  30,
+                  Math.min(100, Math.round(Number(e.target.value) || 100)),
+                ),
+              )
+            }
+          />
+        </label>
+        <label title="Night bonus: defenders fight with double strength while it is night in the world (0:00–8:00), never against barbarians.">
+          <input
+            type="checkbox"
+            checked={night}
+            onChange={(e) => setNight(e.target.checked)}
+          />{" "}
+          🌙 Night
+        </label>
+        <label title="Luck changes how strong the attack counts: −25% to +25%. Every real attack gets its own random luck.">
           🍀 Luck %{" "}
           <input
             type="number"

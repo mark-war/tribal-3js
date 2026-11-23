@@ -104,7 +104,7 @@ export const intelFresh = (
   i: BotIntel | undefined,
   now: number,
 ): i is BotIntel & { rating: Record<string, number> } =>
-  !!i?.rating && now - i.at < intelTtlMs();
+  !!i?.rating && now >= i.at && now - i.at < intelTtlMs();
 function remember(botId: string, villageId: string, i: BotIntel) {
   INTEL.set(ikey(botId, villageId), i);
   if (INTEL.size > 30000) {
