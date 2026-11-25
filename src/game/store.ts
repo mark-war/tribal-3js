@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { DEFAULT_PRESETS } from "./presets";
 import { NIGHT, isNightAt, moraleFor, pointsOf } from "./core/modifiers";
+import { locatePaladin } from "./core/paladin";
 import { BUILDINGS } from "./config/buildings";
 import { UNIT_IDS, UNITS } from "./config/units";
 import {
@@ -37,7 +38,6 @@ import {
   garrison,
   hidingProtect,
   merchantsFree,
-  paladinCount,
   recallWindowMs,
   setSpeed,
   setWorldClock,
@@ -108,7 +108,6 @@ import type {
   Village,
   WaveDraft,
 } from "./core/types";
-import { locatePaladin } from "./core/paladin";
 
 export const SAVE_KEY = "tribal-3js-save";
 
@@ -296,13 +295,13 @@ interface GameState {
   /** Send resources from the active village to another of yours. Returns an error message or null. */
   trade: (toId: string, cargo: Cost) => string | null;
   savePreset: (name: string, waves: WaveDraft[]) => void;
+  /** Send the Paladin to another of your villages, wherever he is now (at home, standing as support somewhere, ...). Returns an error message or null. */
+  movePaladin: (toId: string) => string | null;
   deletePreset: (id: string) => void;
   updatePreset: (
     id: string,
     patch: { name?: string; waves?: WaveDraft[] },
   ) => void;
-  /* */
-  movePaladin: (toId: string) => string | null;
 }
 
 const name = (id: UnitId) => UNITS[id].name;
@@ -479,9 +478,9 @@ export const useGame = create<GameState>()(
         const s = get();
         if (
           u === "paladin" &&
-          (n !== 1 || paladinCount(s.villages, s.commands) > 0)
+          (n !== 1 || locatePaladin(s.villages, s.commands) !== null)
         )
-          return; // one hero only
+          return; // one hero only (wherever he is: at home, on the road, standing as support or in training)
         const nv = tryRecruit(
           s.villages[s.activeId],
           u,
@@ -1638,6 +1637,20 @@ export const useGame = create<GameState>()(
             continue;
           }
 
+          if (c.kind === "paladin_move") {
+            // the Paladin reaches the village he was sent to and stands there as a normal defender (not as support)
+            const dest = villages[c.toId];
+            if (!dest || dest.owner !== PLAYER) {
+              goHome(c.units); // the village fell while he walked: he turns back
+              continue;
+            }
+            const h = settle(normalizeVillage(dest), now);
+            h.units.paladin = (h.units.paladin ?? 0) + (c.units.paladin ?? 1);
+            villages[h.id] = h;
+            say(c.id, `🦸 The Paladin arrived at ${h.name}`);
+            continue;
+          }
+
           if (c.kind === "scout" && c.clan) {
             // a bot's scouts: they learn about the village, you get no report
             const sc = CLANS.find((k) => k.name === c.clan);
@@ -1830,26 +1843,6 @@ export const useGame = create<GameState>()(
               ...(r.tier >= 3 ? { buildings: { ...target.buildings } } : {}),
             };
             goHome({ ...emptyUnits(), scout: r.left });
-            continue;
-          }
-
-          // Handle Paladin relocation separately from normal troop arrivals
-          if (c.kind === "paladin_move") {
-            const dest = villages[c.toId];
-
-            if (!dest || dest.owner !== PLAYER) {
-              goHome(c.units);
-              continue;
-            }
-
-            const h = settle(normalizeVillage(dest), now);
-
-            // Add Paladin to the village's own army, NOT stationed support
-            h.units.paladin = (h.units.paladin ?? 0) + (c.units.paladin ?? 1);
-
-            villages[h.id] = h;
-            // say(c.id, `🦸 The Paladin arrived at ${h.name}`);
-
             continue;
           }
 

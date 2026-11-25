@@ -22,7 +22,6 @@ import {
   recallWindowMs,
   settle,
   garrison,
-  paladinCount,
   popCap,
   popCapAt,
   popBreakdown,
@@ -32,6 +31,7 @@ import {
   worldAgeHours,
 } from "../game/core/economy";
 import { NIGHT, gameHourAt, isNightAt } from "../game/core/modifiers";
+import { locatePaladin } from "../game/core/paladin";
 import { PLAYER, rivalInfo } from "../game/core/world";
 import { protectionLeftHours, type RivalMode } from "../game/core/rivals";
 import { AGGRESSION } from "../game/core/botbrain";
@@ -69,7 +69,6 @@ import { kindIcon } from "./icons";
 import ReportView from "./ReportView";
 import WarTable from "./WarTable";
 import RallyPanel from "./RallyPanel";
-import { locatePaladin } from "../game/core/paladin";
 
 type Req = { building: BuildingId; level: number };
 type TipState = { x: number; y: number; node: ReactNode } | null;
@@ -296,11 +295,10 @@ export default function Hud() {
     mine.reduce((n, x) => n + x.points, 0),
   );
 
+  // ---- strategy helpers: own weak spot, attack mix, and a prediction from the last scout report ----
   const spot = locatePaladin(villages, commands); // where he is: home, standing as support, on the road or in training
   const paladinExists = spot !== null;
-
   const spotName = (id: string) => villages[id]?.name ?? id;
-
   const spotText = !spot
     ? ""
     : spot.where === "home"
@@ -310,7 +308,6 @@ export default function Hud() {
         : spot.where === "training"
           ? `in training at ${spotName(spot.villageId)}`
           : `on the road to ${spotName(spot.toId)}`;
-
   const spotVillage = !spot
     ? undefined
     : spot.where === "home"
@@ -320,7 +317,6 @@ export default function Hud() {
         : spot.where === "training"
           ? spot.villageId
           : undefined;
-
   const hl = heroLevel(hero.xp);
   const rating = defenseRating(
     garrison(v),
@@ -483,11 +479,7 @@ export default function Hud() {
               villages[spotVillage]?.owner === PLAYER &&
               setActive(spotVillage)
             }
-            title={`Paladin level ${hl}: +${Math.round(
-              hl * HERO_ATTACK_PER_LEVEL * 100,
-            )}% attack to the armies he leads. He is ${spotText}.${
-              spotVillage ? " Click to go to that village." : ""
-            }`}
+            title={`Paladin level ${hl}: +${Math.round(hl * HERO_ATTACK_PER_LEVEL * 100)}% attack to the armies he leads. He is ${spotText}.${spotVillage ? " Click to go to that village." : ""}`}
           >
             🦸 Lv {hl}
             <small>

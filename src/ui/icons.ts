@@ -8,6 +8,7 @@ const ICON: Record<string, string> = {
   expand: "🏰",
   strike: "🚩",
   rally: "📯",
+  paladin_move: "🦸",
   return: "🏠",
 };
 const COLOR: Record<string, string> = {
@@ -19,6 +20,7 @@ const COLOR: Record<string, string> = {
   expand: "#b71c1c",
   strike: "#b71c1c",
   rally: "#ffa726",
+  paladin_move: "#ffd54f",
   return: "#66bb6a",
 };
 export const kindIcon = (k: string) => ICON[k] ?? "•";

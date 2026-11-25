@@ -43,7 +43,7 @@ export const botNobleCost = (r: (typeof RES)[number]) =>
  * on, once its Headquarters (10) and Barracks (5) are developed. Without it no bot gets an Academy until the world is
  * many hours old, so nobody expands onto barbarian villages for a long time.
  */
-export const BOT_ACADEMY_SHORTCUT = false;
+export const BOT_ACADEMY_SHORTCUT = true;
 export const botCanNoble = (v: Village) =>
   meetsReq(v, "noble") ||
   (BOT_ACADEMY_SHORTCUT && v.buildings.main >= 10 && v.buildings.barracks >= 5);
