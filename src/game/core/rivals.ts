@@ -63,19 +63,23 @@ export interface RivalState {
 const HOUR = 3_600_000;
 export const graceMs = () => (12 * HOUR) / SPEED; // nobody raids you in your first 12 game hours
 export const raidIntervalMs = () => (25 * HOUR) / SPEED; // typical gap between unprovoked raids
-export const retaliateDelayMs = () => (4 * HOUR) / SPEED; // how soon a provoked clan hits back
+export const retaliateDelayMs = () => (0.5 * HOUR) / SPEED; // how soon a provoked clan hits back: half a game hour (it was 4, long enough for the grudge to fade first)
 const grudgeDecayPerMs = () => SPEED / (15 * HOUR); // a grudge fades by 1 every 15 game hours
+/** A grudge above this means you TOOK a village from it (a conquest adds 5, a raid 1): it answers with nobles, not just raids. */
+const REVENGE_CONQUEST_GRUDGE = 3;
 /** Beginner protection: for the first 24 game hours (or until you reach 800 points) bots cannot attack you, and you cannot attack them. */
 export const PROTECT_HOURS = 24;
 export const PROTECT_POINTS = 800;
 export const protectionLeftHours = (ageHours: number, points: number) =>
   points >= PROTECT_POINTS ? 0 : Math.max(0, PROTECT_HOURS - ageHours);
+/** Every bot village keeps at least this many scouts. They are the first thing a village retrains: a bot with no scouts cannot look at anything, so it never attacks or conquers anything. */
+const SCOUT_FLOOR = 10;
 const GROW_EVERY_MS = 20_000; // real ms between two training updates of a rival village
 export const MAX_CATCHUP = 2; // safety bound on raids launched in one step
 export const respawnMs = () => (6 * HOUR) / SPEED; // a wiped-out bot starts again 6 game hours later
 const MAX_RANGE = 90;
 export const expandIntervalMs = () => (36 * HOUR) / SPEED; // the rising kingdom sends a noble run about every 36 game hours
-const MAX_HOLDINGS = 6; // villages a bot can take on its own
+// (the cap on villages a bot can take with nobles is MAX_HOLDINGS in core/botbrain.ts)
 const BUILD_CAP: Partial<Record<BuildingId, number>> = {
   timber: 20,
   clay: 20,
@@ -99,9 +103,6 @@ const h01 = (s: string) => {
   h = Math.imul(h ^ (h >>> 15), 2246822507);
   return ((h ^ (h >>> 13)) >>> 0) / 4294967296;
 };
-const total = (u: Units) => UNIT_IDS.reduce((s, k) => s + u[k], 0);
-const attackPower = (u: Units) =>
-  UNIT_IDS.reduce((s, k) => s + u[k] * UNITS[k].attack, 0);
 
 /** What a bot builds, in the order it would like to (like a player: economy first, then army, then the late game). */
 const BUILD_ORDER: BuildingId[] = [
@@ -176,9 +177,14 @@ export function growRival(
       ? buildCost(next, v.buildings[next] + queued(next) + 1)
       : { wood: 0, clay: 0, iron: 0 };
   if (v.recruitQueue.length === 0) {
-    const deficit = (u: UnitId) => plan.units[u] - v.units[u];
+    const goalOf = (u: UnitId) =>
+      u === "scout" ? Math.max(plan.units.scout, SCOUT_FLOOR) : plan.units[u];
+    const deficit = (u: UnitId) => goalOf(u) - v.units[u];
+    // scouts first (they are cheap, and everything else a bot does starts with a scouting report), then the biggest gap
+    const weight = (u: UnitId) =>
+      u === "scout" ? 1e9 : deficit(u) * UNITS[u].pop;
     const wants = UNIT_IDS.filter((u) => deficit(u) > 0 && meetsReq(v, u)).sort(
-      (x, y) => deficit(y) * UNITS[y].pop - deficit(x) * UNITS[x].pop,
+      (x, y) => weight(y) - weight(x),
     );
     for (const u of wants) {
       const afford = Math.min(
@@ -318,7 +324,9 @@ export function stepRivals(a: {
   const stance = (id: string): Stance => {
     if (a.protectedPlayer || a.mode === "peace") return "no"; // beginner protection / peaceful world
     if (a.mode === "war") return "conquer"; // like a normal player: raids and noble trains
-    return (out[id]?.grudge ?? 0) > 0.5 || (a.mode === "raids" && id === nem.id)
+    const grudge = out[id]?.grudge ?? 0;
+    if (grudge > REVENGE_CONQUEST_GRUDGE) return "conquer"; // you took a village from it: it wants it back
+    return grudge > 0.5 || (a.mode === "raids" && id === nem.id)
       ? "raid"
       : "no";
   };
@@ -343,7 +351,13 @@ export function stepRivals(a: {
     for (const b of BOTS) {
       // grudges fade
       const st = out[b.id];
-      if (!st || st.grudge <= 0) continue;
+      if (!st) continue;
+      if (st.grudge <= 0) {
+        // keep the clock current: a grudge that arrives later (the store adds it without touching updatedAt) must not
+        // start with hours of fading already counted, which used to wipe it out before the bot could act on it
+        if (st.updatedAt !== a.now) out[b.id] = { ...st, updatedAt: a.now };
+        continue;
+      }
       out[b.id] = {
         ...st,
         grudge: Math.max(
@@ -387,6 +401,10 @@ export function stepRivals(a: {
           respawnAt: undefined,
           bornAge: worldAgeHours(a.now),
           lives: (rs.lives ?? 1) + 1,
+          // a new life starts clean: the villages it took before no longer count against its cap, and its old Paladin is gone
+          held: 0,
+          heroXp: 0,
+          followUp: false,
           nextActAt: a.now + (8 * HOUR) / SPEED,
         };
         news.push(`🌱 ${b.name} starts again at ${nv.id} as a newcomer`);

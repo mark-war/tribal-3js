@@ -1192,9 +1192,10 @@ export const useGame = create<GameState>()(
           rivalsNext[clan.id] = {
             ...st,
             grudge: Math.min(6, st.grudge + amount),
-            nextRaidAt: Math.min(st.nextRaidAt, now + retaliateDelayMs()),
+            updatedAt: now,
+            // nextRaidAt: Math.min(st.nextRaidAt, now + retaliateDelayMs()),
             nextActAt: Math.min(
-              st.nextActAt ?? Infinity,
+              st.nextActAt ?? retaliateDelayMs(),
               now + retaliateDelayMs(),
             ), // it takes its next turn soon, first in line
             followUp: true,

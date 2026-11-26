@@ -37,7 +37,6 @@ import {
   BOTS,
   PLAYER,
   botVillages,
-  nearestBarbarians,
   normalizeVillage,
   rivalInfo,
   villageAt,
@@ -57,6 +56,8 @@ import {
   strikePool,
   type LaunchCtx,
 } from "./botwar";
+import { barbReach, freeBarbarians, pickSource } from "./botexpand";
+import { BOT_DEBUG, debugBot } from "./botdebug"; // temporary: console report on why bots do not conquer
 import type { Stats } from "./ranking";
 import type { Command, Cost, Units, UnitId, Village } from "./types";
 
@@ -67,7 +68,8 @@ import type { Command, Cost, Units, UnitId, Village } from "./types";
  * landing right behind it, because only one noble works per attack. All fights use your battle rules.
  */
 const HOUR = 3_600_000;
-export const MAX_HOLDINGS = 500; // villages a bot can take with nobles
+/** Villages a bot can take with nobles over the whole game. It used to be 6, and a bot that had taken 6 never conquered again. */
+export const MAX_HOLDINGS = 1000;
 export const h01 = (s: string) => {
   // deterministic "random" from a string
   let h = 2166136261;
@@ -89,6 +91,20 @@ const pickUnits = (
     o[u] = Math.max(0, Math.min(v.units[u], f(v.units[u], u)));
   return o;
 };
+
+/**
+ * When each bot last sent scouts at each village (memory only). A village it just looked at and could not read waits before the
+ * next look, twice as long after every failure. Before this a bot that could not read a village scouted it again on every turn.
+ */
+const LOOKED = new Map<string, number>();
+const lookKey = (botId: string, villageId: string) => `${botId}|${villageId}`;
+const lookCooldownMs = (tries: number) =>
+  (0.5 * HOUR * 2 ** Math.min(tries, 5)) / SPEED; // 30 game minutes, then 1h, 2h, 4h ... up to 16h
+/** Scouts for a look: a few at first, twice as many after every failed look (a failed look means the village has scouts of its own). */
+export const scoutCount = (
+  kind: "barbarian" | "bot" | "player",
+  tries: number,
+) => (kind === "barbarian" ? 2 : 8) * 2 ** Math.min(tries, 5);
 
 /**
  * How bold the bots are. Every level still scouts first and only attacks what its report says it can beat; a bolder level
@@ -195,18 +211,6 @@ const newResult = (): TurnResult => ({
   held: 0,
 });
 
-/** The 8 nearest barbarian villages to a village, remembered for 2 minutes (searching the map for them cost 7 ms per call and a bot looks several times per turn). */
-const BARB_CACHE = new Map<string, { at: number; list: Village[] }>();
-function nearbyBarbarians(from: [number, number], now: number): Village[] {
-  const key = `${from[0]}|${from[1]}`;
-  const c = BARB_CACHE.get(key);
-  if (c && now - c.at < 120_000) return c.list;
-  const list = nearestBarbarians(from, now, 8);
-  BARB_CACHE.set(key, { at: now, list });
-  if (BARB_CACHE.size > 3000) BARB_CACHE.clear();
-  return list;
-}
-
 /** What a bot could do right now: its best strike village, and every target in reach (with odds ONLY where it has a report). */
 export function planOptions(
   bot: Clan,
@@ -218,7 +222,8 @@ export function planOptions(
   const pool = strikePool(bot);
   const strikePower = (v: Village) =>
     pool.reduce((s, u) => s + v.units[u] * UNITS[u].attack, 0);
-  const src = mine.reduce((b, v) => (strikePower(v) > strikePower(b) ? v : b));
+  // the village it attacks from: the strongest one, unless another village can really send nobles (only that one can conquer)
+  const src = pickSource(mine, strikePower);
   const have = emptyUnits();
   for (const u of pool) have[u] = src.units[u];
   const heroAway = ctx.commands.some(
@@ -251,21 +256,22 @@ export function planOptions(
     (ctx.held[bot.id] ?? 0) < MAX_HOLDINGS;
   const d = (v: Village) => Math.hypot(v.x - src.x, v.y - src.y);
   const cands: { t: Village; kind: Option["kind"] }[] = [];
-  let barbs = 0; // the three nearest barbarian villages nobody has taken yet
-  for (const b0 of nearbyBarbarians([src.x, src.y], ctx.now)) {
-    const b = ctx.world[b0.id] ?? b0;
-    if (b.owner !== null || d(b) > 40) continue;
+  // the three nearest barbarian villages nobody has taken yet; the further out it looks, the bigger its empire is
+  for (const b of freeBarbarians(
+    [src.x, src.y],
+    ctx.world,
+    ctx.now,
+    barbReach(mine.length),
+    3,
+  ))
     cands.push({ t: b, kind: "barbarian" });
-    if (++barbs >= 3) break;
-  }
   for (const b of BOTS) {
-    if (
-      b.id === bot.id ||
-      Math.hypot(b.home[0] - src.x, b.home[1] - src.y) > 55
-    )
-      continue;
+    if (b.id === bot.id) continue;
+    // it walks further to hit back at whoever hit it
+    const range = feudOf(bot.id, b.name, ctx.now) > 0.3 ? 90 : 55;
+    if (Math.hypot(b.home[0] - src.x, b.home[1] - src.y) > range + 60) continue; // empires spread: their villages can be well away from their home
     for (const v of botVillages(b, ctx.world, ctx.now))
-      if (d(v) <= 55) cands.push({ t: v, kind: "bot" });
+      if (d(v) <= range) cands.push({ t: v, kind: "bot" });
   }
   if (ctx.stance !== "no") {
     // like a player with a long list of neighbours: look at the few weakest-looking villages in reach, not at all of them (with 100+ villages that was hundreds of scouting missions)
@@ -320,11 +326,13 @@ export function planOptions(
         const waiting =
           (info?.pendingUntil ?? 0) > ctx.now || (info?.at ?? 0) > ctx.now; // its scouts are still on the way
         const beatable = power * 0.85 >= 2.5 * t.points; // from the points on the map, is it worth a look at all?
+        const tries = info?.tries ?? 0;
         const stuck =
           waiting ||
           !beatable ||
-          ((info?.tries ?? 0) >= 3 &&
-            src.units.scout < (info?.lastSent ?? 0) * 2);
+          (tries >= 3 && src.units.scout < scoutCount(kind, tries)) || // it keeps failing and cannot send more scouts
+          ctx.now - (LOOKED.get(lookKey(bot.id, t.id)) ?? -Infinity) <
+            lookCooldownMs(tries); // it looked a moment ago and could not read it: not again yet
         return {
           ...base,
           stuck,
@@ -536,6 +544,7 @@ function oneAction(
   A: Aggr,
 ): string | null {
   const plan = planOptions(bot, ctx);
+  if (BOT_DEBUG) debugBot(bot, ctx, plan, MAX_HOLDINGS); // temporary
   if (!plan) return null;
   const pool = strikePool(bot);
   const s = settle(normalizeVillage(plan.src), ctx.now); // botwar edits this village in place
@@ -555,21 +564,55 @@ function oneAction(
   // ---- no report on anything worth hitting: scout first ----
   if (!viable.length) {
     const unknown = plan.options.filter((o) => !o.known && !o.stuck); // never scout what it cannot beat or is already looking at
+    if (!unknown.length) return null;
     const flying = ctx.commands.filter(
       (c) => c.clan === bot.name && c.kind === "scout" && c.arriveAt > ctx.now,
     ).length;
-    if (!unknown.length || s.units.scout < 1 || flying >= 2 + A.launches)
-      return null; // and never flood the map with scouts
-    const best = unknown.reduce((b, o) => (o.score > b.score ? o : b));
-    const count = Math.max(
-      best.kind === "barbarian" ? 2 : 8,
-      (getIntel(bot.id, best.id)?.lastSent ?? 0) * 2,
-    ); // after a failure it doubles the scouts
-    if (best.kind === "player")
-      sendScouts(lc, bot, s, best.target, count); // you see these coming and can fight them
-    else quickScout(bot, s, best.target, count, ctx, out);
+    const bestOf = (list: Option[]) =>
+      list.length ? list.reduce((b, o) => (o.score > b.score ? o : b)) : null;
+    const others = bestOf(unknown.filter((o) => o.kind !== "player")); // barbarians and other bots
+    const you =
+      flying < 2 + A.launches // never flood the map with scouts
+        ? bestOf(unknown.filter((o) => o.kind === "player"))
+        : null;
+    const countFor = (o: Option) =>
+      scoutCount(o.kind, getIntel(bot.id, o.id)?.tries ?? 0); // after a failed look it doubles the scouts
+    // The scouts come from the bot's village NEAREST to the target that has some. The village it attacks from often has none
+    // (scouts that die are the last thing a village retrains), and a bot with no scouts there never looked at anything.
+    const mineNow = botVillages(bot, { ...ctx.world, ...out.changed }, ctx.now);
+    const scoutFrom = (t: Village): Village | null => {
+      let best: Village | null = null;
+      let bd = Infinity;
+      for (const v of mineNow) {
+        const have = (out.changed[v.id] ?? v).units.scout;
+        const dd = Math.hypot(v.x - t.x, v.y - t.y);
+        if (have >= 2 && dd < bd) {
+          bd = dd;
+          best = v;
+        }
+      }
+      if (!best) return null;
+      return best.id === s.id
+        ? s
+        : settle(normalizeVillage(out.changed[best.id] ?? best), ctx.now);
+    };
+    if (LOOKED.size > 20000) LOOKED.clear();
+    // It looks at BOTH in one turn. A bot that was after you used to spend every turn scouting your villages (their score is
+    // multiplied) and never got to look at a single barbarian village, so it never conquered one.
+    const fromO = others ? scoutFrom(others.target) : null;
+    if (others && fromO) {
+      quickScout(bot, fromO, others.target, countFor(others), ctx, out);
+      LOOKED.set(lookKey(bot.id, others.id), ctx.now);
+    }
+    const fromY = you ? scoutFrom(you.target) : null;
+    if (you && fromY) {
+      sendScouts(lc, bot, fromY, you.target, countFor(you)); // you see these coming and can fight them
+      LOOKED.set(lookKey(bot.id, you.id), ctx.now);
+    }
+    const didOthers = !!(others && fromO);
+    if (!didOthers && !(you && fromY)) return null; // no village of this bot has scouts to spare
     out.scouted = true;
-    return finish(best.id);
+    return finish((didOthers ? others : you)!.id);
   }
 
   const advised = ctx.advice
@@ -777,7 +820,13 @@ export function landStrike(
   const victim = prevOwner ? rivalInfo(prevOwner) : null;
   if (victim) {
     out.bumps.push([prevOwner!, { kills: fell, lost: killed }]);
-    noteFeud(victim.id, bot.name, res.attackerWins ? 1 : 0.4, now);
+    // a village taken from it is remembered much harder than a raid
+    noteFeud(
+      victim.id,
+      bot.name,
+      out.held ? 3 : res.attackerWins ? 1 : 0.4,
+      now,
+    );
   } // it will hit back
   return out;
 }

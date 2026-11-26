@@ -78,7 +78,9 @@ export const BOTS: Clan[] = (() => {
   });
 })();
 export const CLANS = BOTS; // older code calls them clans
-const BOT_AT = new Map(BOTS.map((b) => [`${b.home[0]}|${b.home[1]}`, b]));
+const BOT_AT = new Map(
+  BOTS.map((b) => [`${b.home[0]}|${b.home[1]}`, b] as const),
+);
 const BOT_BY_NAME = new Map(BOTS.map((b) => [b.name, b]));
 /** Your nemesis is the bot that lives closest to where you start. */
 const NEMESIS_ID = BOTS.reduce((best, b) =>
